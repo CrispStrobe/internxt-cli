@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/utils/api.py
-API client for Internxt services - CORRECTED TO MATCH THE COMPLETE SDK BLUEPRINT
+API client for Internxt services
 """
 
 import requests
@@ -16,7 +16,7 @@ from config.config import config_service
 
 class ApiClient:
     """
-    HTTP client for Internxt API. All endpoints are corrected to match the official SDK blueprint.
+    HTTP client for Internxt API
     """
 
     def __init__(self):
@@ -25,7 +25,8 @@ class ApiClient:
         self.network_url = config_service.get('NETWORK_URL')
         self.session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': 'internxt-python-cli/4.0.0' # Final Blueprint Version
+            'User-Agent': 'internxt-python-cli/4.0.0',
+            'Accept': 'application/json',                   # needed?
         })
 
     def set_auth_tokens(self, token: Optional[str], new_token: Optional[str]):
@@ -35,15 +36,24 @@ class ApiClient:
         else:
             self.session.headers.pop('Authorization', None)
 
-    def _make_request(self, method: str, url: str, data: Optional[Dict[str, Any]] = None, 
-                      headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def _make_request(self, method: str, url: str, data: Optional[Any] = None, 
+                      headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None, 
+                      auth: Optional[tuple] = None, is_json=True) -> requests.Response:
         """Central request handler, returns the full response object."""
         try:
             request_headers = self.session.headers.copy()
             if headers:
                 request_headers.update(headers)
             
-            response = requests.request(method, url, json=data, headers=request_headers, params=params, timeout=30)
+            # If basic auth is provided, it overrides the session's Bearer token
+            if auth:
+                request_headers.pop('Authorization', None)
+
+            json_payload = data if is_json else None
+            data_payload = data if not is_json else None
+
+            response = requests.request(method, url, json=json_payload, data=data_payload, 
+                                        headers=request_headers, params=params, auth=auth, timeout=300)
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:
@@ -54,17 +64,17 @@ class ApiClient:
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Network request failed for {url}: {e}") from e
 
-    def get(self, url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None) -> Dict[str, Any]:
+    def get(self, url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make GET request and return JSON"""
-        response = self._make_request("GET", url, params=params, headers=headers)
+        response = self._make_request("GET", url, params=params, headers=headers, auth=auth)
         return response.json() if response.content else {}
     
-    def post(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None) -> Dict[str, Any]:
+    def post(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make POST request and return JSON"""
-        response = self._make_request("POST", url, data=data, headers=headers)
+        response = self._make_request("POST", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
 
-    # --- AUTH API ENDPOINTS (Corrected to match src/auth/index.ts) ---
+    # --- AUTH API ENDPOINTS ---
 
     def security_details(self, email: str) -> Dict[str, Any]:
         """Gets security details (sKey and 2FA status)."""
@@ -76,7 +86,7 @@ class ApiClient:
         url = f"{self.drive_api_url}/auth/login/access"
         return self.post(url, data=payload)
 
-    # --- STORAGE API ENDPOINTS (Corrected to match src/drive/storage/index.ts) ---
+    # --- STORAGE API ENDPOINTS ---
     
     def get_folder_folders(self, folder_uuid: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         """Get subfolders in folder"""
@@ -98,18 +108,39 @@ class ApiClient:
         url = f"{self.drive_api_url}/folders"
         data = {'plainName': plain_name, 'parentFolderUuid': parent_folder_uuid}
         return self.post(url, data)
-        
-    def create_file_entry(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create file entry in drive"""
-        # Corrected Endpoint: /files
+    
+    def start_upload(self, bucket_id: str, file_size: int, auth: tuple) -> Dict[str, Any]:
+        """Gets upload URLs for a file, using Basic Auth."""
+        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start"
+        data = {'uploads': [{'index': 0, 'size': file_size}]}
+        return self.post(url, data, auth=auth)
+
+    def upload_chunk(self, upload_url: str, chunk_data: bytes):
+        """Uploads a raw chunk of data using PUT. No auth needed for pre-signed URL."""
+        response = requests.put(upload_url, data=chunk_data, headers={'Content-Type': 'application/octet-stream'}, timeout=300)
+        response.raise_for_status()
+
+    def finish_upload(self, bucket_id: str, payload: Dict[str, Any], auth: tuple) -> Dict[str, Any]:
+        """Finalizes an upload, using Basic Auth."""
+        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/finish"
+        return self.post(url, data=payload, auth=auth)
+    
+    def create_file_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Creates the file metadata entry in the Drive, matching the SDK blueprint."""
         url = f"{self.drive_api_url}/files"
-        # The SDK blueprint sends a different payload structure than the old baseline
+        return self.post(url, data=payload)
+        
+    def create_file_entry_v1(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create file entry in drive"""
+        
+        url = f"{self.drive_api_url}/files"
+        
         payload = {
             'name': file_data.get('name'),
             'bucket': file_data.get('bucket'),
             'fileId': file_data.get('fileId'),
             'encryptVersion': file_data.get('encryptVersion'),
-            'folderUuid': file_data.get('folderId'), # The old baseline used 'folderId' for a UUID
+            'folderUuid': file_data.get('folderId'), 
             'size': file_data.get('size'),
             'plainName': file_data.get('plainName'),
             'type': file_data.get('type'),
@@ -118,38 +149,47 @@ class ApiClient:
 
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
         """Get file metadata"""
-        # Corrected Endpoint: /files/{uuid}/meta
+        
         url = f"{self.drive_api_url}/files/{file_uuid}/meta"
         return self.get(url)
 
     def get_folder_metadata(self, folder_uuid: str) -> Dict[str, Any]:
         """Get folder metadata"""
-        # Corrected Endpoint: /folders/{uuid}/meta
+        
         url = f"{self.drive_api_url}/folders/{folder_uuid}/meta"
         return self.get(url)
 
     def delete_file(self, file_uuid: str) -> Dict[str, Any]:
         """Delete a file"""
-        # Corrected Endpoint: /files/{uuid}
+        
         url = f"{self.drive_api_url}/files/{file_uuid}"
         return self.delete(url)
 
     def delete_folder(self, folder_uuid: str) -> Dict[str, Any]:
         """Delete a folder"""
-        # Corrected Endpoint: /folders/{uuid}
+        
         url = f"{self.drive_api_url}/folders/{folder_uuid}"
         return self.delete(url)
-
-    # --- OTHER BASELINE METHODS (preserved) ---
 
     def get_storage_usage(self) -> Dict[str, Any]:
         """Get storage usage information"""
         # Corrected Endpoint: /users/usage (v2 endpoint)
         url = f"{self.drive_api_url}/users/usage"
         return self.get(url)
+    
+    def get_download_links(self, bucket_id: str, file_id: str, auth: tuple) -> Dict[str, Any]:
+        """Gets download URLs for a file, using Basic Auth."""
+        url = f"{self.network_url}/buckets/{bucket_id}/files/{file_id}/info"
+        return self.get(url, headers={'x-api-version': '2'}, auth=auth)
+
+    def download_chunk(self, download_url: str) -> bytes:
+        """Downloads a raw chunk of data. No auth needed for pre-signed URL."""
+        response = requests.get(download_url, timeout=300)
+        response.raise_for_status()
+        return response.content
 
     # Note: The network API methods below interact with a different service ('gateway.internxt.com')
-    # and their endpoints might be correct as they are. They are preserved from the baseline.
+    # and their endpoints MIGHT be correct as they are. Will check later...
     def get_upload_urls(self, bucket_id: str, file_size: int) -> Dict[str, Any]:
         """Get upload URLs for file"""
         # This endpoint uses NETWORK_URL, not DRIVE_API_URL

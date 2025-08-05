@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Internxt CLI - Python implementation matching TypeScript blueprint EXACTLY
-All cryptographic operations, authentication flows, and API calls now match the original TypeScript implementation
+Internxt CLI - Python implementation
 """
 
 import click
@@ -69,7 +68,7 @@ def format_date(date_string: str) -> str:
 @click.group()
 @click.version_option(version='1.0.0')
 def cli():
-    """Internxt Python CLI - Fixed to match TypeScript blueprint exactly"""
+    """Internxt Python CLI"""
     pass
 
 
@@ -296,13 +295,13 @@ def logout():
 @cli.command()
 def test():
     """Test CLI components with exact TypeScript logic validation"""
-    click.echo("🧪 Testing CLI components with TypeScript blueprint validation...")
+    click.echo("🧪 Testing CLI components ...")
     click.echo("=" * 60)
     
     tests_passed = 0
     total_tests = 6
     
-    # Test 1: Config service - EXACT TypeScript paths
+    # Test 1: Config service
     try:
         assert config_service.get('DRIVE_NEW_API_URL') == 'https://api.internxt.com/drive'
         click.echo("✅ Config service - exact TypeScript match")
@@ -310,7 +309,7 @@ def test():
     except Exception as e:
         click.echo(f"❌ Config service failed: {e}")
     
-    # Test 2: Crypto service - EXACT TypeScript CryptoJS compatibility
+    # Test 2: Crypto service
     try:
         test_text = "Hello World"
         encrypted = crypto_service.encrypt_text(test_text)
@@ -321,7 +320,7 @@ def test():
     except Exception as e:
         click.echo(f"❌ Crypto service failed: {e}")
     
-    # Test 3: API endpoints - CORRECTED to match working live API
+    # Test 3: API endpoints
     try:
         login_url = f"{api_client.drive_api_url}/auth/login"
         expected_login = "https://api.internxt.com/drive/auth/login"
@@ -332,7 +331,7 @@ def test():
     except Exception as e:
         click.echo(f"❌ API endpoint test failed: {e}")
     
-    # Test 4: Auth service structure - TypeScript LoginCredentials structure
+    # Test 4: Auth service structure
     try:
         # Test the structure without actually logging in
         assert hasattr(auth_service, 'do_login')
@@ -345,7 +344,7 @@ def test():
     except Exception as e:
         click.echo(f"❌ Auth service structure test failed: {e}")
     
-    # Test 5: Mnemonic validation - TypeScript ValidationService
+    # Test 5: Mnemonic validation
     try:
         valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
         is_valid = crypto_service.validate_mnemonic(valid_mnemonic)
@@ -355,7 +354,7 @@ def test():
     except Exception as e:
         click.echo(f"❌ Mnemonic validation test failed: {e}")
     
-    # Test 6: File path structure - TypeScript ConfigService paths
+    # Test 6: File path structure
     try:
         home_dir = Path.home()
         expected_config_dir = home_dir / '.internxt-cli'
@@ -375,7 +374,7 @@ def test():
 
 @cli.command()
 def config():
-    """Show current configuration - matches TypeScript config command"""
+    """Show current configuration"""
     try:
         click.echo("⚙️  Internxt CLI Configuration")
         click.echo("=" * 40)
@@ -412,34 +411,35 @@ def config():
     except Exception as e:
         click.echo(f"❌ Error reading configuration: {e}", err=True)
 
+@cli.command()
+@click.argument('filepath', type=click.Path(exists=True, dir_okay=False, resolve_path=True))
+@click.option('--destination', '-d', help='Destination folder UUID (defaults to root folder)')
+def upload(filepath, destination):
+    """Encrypts and uploads a file to your Internxt Drive."""
+    try:
+        drive_service.upload_file(filepath, destination)
+    except Exception as e:
+        click.echo(f"❌ Error uploading file: {e}", err=True)
+        # Uncomment the line below for full debug trace
+        # import traceback; traceback.print_exc()
+        sys.exit(1)
+
+@cli.command()
+@click.argument('file_uuid')
+@click.option('--destination', '-d', type=click.Path(file_okay=True, writable=True, resolve_path=True), default='.')
+def download(file_uuid, destination):
+    """Downloads and decrypts a file from your Internxt Drive."""
+    try:
+        drive_service.download_file(file_uuid, destination)
+    except Exception as e:
+        click.echo(f"❌ Error downloading file: {e}", err=True)
+        # Uncomment the line below for full debug trace
+        # import traceback; traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == '__main__':
     if len(sys.argv) == 1:
-        print("🚀 Internxt Python CLI - Fixed to Match TypeScript Blueprint Exactly")
+        print("🚀 Internxt Python CLI")
         print("=" * 70)
-        print("📋 Available commands:")
-        print("  python cli.py login --debug     # Login with debug info")
-        print("  python cli.py test              # Test all components")  
-        print("  python cli.py whoami            # Check login status")
-        print("  python cli.py list              # List files and folders")
-        print("  python cli.py mkdir <name>      # Create folder")
-        print("  python cli.py config            # Show configuration")
-        print("  python cli.py logout            # Logout")
-        print("  python cli.py --help            # Show all commands")
-        print()
-        print("🔧 This version now uses EXACT TypeScript logic:")
-        print("   • CryptoService matches CryptoJS implementation")
-        print("   • AuthService matches exact login flow")
-        print("   • API calls match SDK structure")
-        print("   • ConfigService matches file paths")
-        print("   • All authentication tokens handled correctly")
-        print()
-        print("🎯 Key fixes applied:")
-        print("   ✅ Password hashing: PBKDF2-SHA1 with 10,000 iterations")
-        print("   ✅ Text encryption: AES-256-CBC with CryptoJS format")
-        print("   ✅ Token validation: JWT expiration and refresh logic")
-        print("   ✅ API endpoints: Exact SDK URL structure")
-        print("   ✅ Mnemonic handling: BIP39 validation")
-        print()
     
     cli()

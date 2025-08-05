@@ -32,8 +32,8 @@ except ImportError:
 
 class DriveService:
     """
-    Handles drive operations - EXACT match to TypeScript DriveFolderService + NetworkFacade
-    Combines functionality from multiple TypeScript services:
+    Handles drive operations
+    matches functionality from multiple TypeScript services:
     - DriveFolderService (folder operations)
     - NetworkFacade (file upload/download with encryption)
     - Environment.utils (file key generation)
@@ -45,14 +45,26 @@ class DriveService:
         self.crypto = crypto_service
         self.auth = auth_service
 
-        # EXACT match to TypeScript NetworkFacade constants
-        self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024  # 20GB limit
+        self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024   # 20GB limit
         self.MULTIPART_THRESHOLD = 100 * 1024 * 1024      # 100MB multipart threshold
         self.CHUNK_SIZE = 64 * 1024 * 1024                # 64MB chunks
 
+    def _get_network_auth(self, user_creds: Dict[str, Any]) -> tuple:
+        """
+        Creates the Basic Auth credentials for the Network API, as per the SDK blueprint.
+        """
+        bridge_user = user_creds.get('bridgeUser')
+        user_id = user_creds.get('userId')
+        if not bridge_user or not user_id:
+            raise ValueError("Missing network credentials (bridgeUser, userId)")
+        
+        # As per the SDK, the password for Basic Auth is a SHA256 hash of the userId
+        hashed_password = hashlib.sha256(str(user_id).encode()).hexdigest()
+        return (bridge_user, hashed_password)
+
     def get_folder_content(self, folder_uuid: str) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Get folder contents - EXACT match to TypeScript DriveFolderService.getFolderContent
+        Get folder contents
         """
         try:
             # Ensure we have valid authentication as in TypeScript
@@ -150,7 +162,7 @@ class DriveService:
 
     def create_folder(self, name: str, parent_folder_uuid: str = None) -> Dict[str, Any]:
         """
-        Create a new folder - EXACT match to TypeScript DriveFolderService.createFolder
+        Create a new folder
         """
         credentials = self.auth.get_auth_details()
 
@@ -159,245 +171,125 @@ class DriveService:
             if not parent_folder_uuid:
                 raise ValueError("No root folder ID found")
 
-        # EXACT match to TypeScript API call
         return self.api.create_folder(name, parent_folder_uuid)
 
-    def upload_file(self, file_path: str, destination_folder_uuid: str = None,
-                   progress_callback=None) -> Dict[str, Any]:
+    def upload_file(self, file_path_str: str, destination_folder_uuid: str = None):
         """
-        Upload a file to Internxt Drive - EXACT match to TypeScript NetworkFacade.uploadFile
-        Combines TypeScript logic from NetworkFacade + Environment.upload
+        Encrypts and uploads a file to Internxt Drive, following the SDK blueprint.
         """
-        file_path = Path(file_path)
-
-        if not file_path.exists() or not file_path.is_file():
-            raise ValueError(f"File not found: {file_path}")
-
-        file_size = file_path.stat().st_size
-        if file_size == 0:
-            raise ValueError("Cannot upload empty files")
-
-        # EXACT match to TypeScript: if (size > TWENTY_GIGABYTES)
-        if file_size > self.TWENTY_GIGABYTES:
-            raise ValueError(f"File is too big (more than 20 GB)")
-
         credentials = self.auth.get_auth_details()
         user = credentials['user']
+        bucket_id = user['bucket']
+        mnemonic = user['mnemonic']
+        network_auth = self._get_network_auth(user)
 
         if not destination_folder_uuid:
-            destination_folder_uuid = user.get('rootFolderId', '')
-            if not destination_folder_uuid:
-                raise ValueError("No root folder ID found")
+            destination_folder_uuid = user['rootFolderId']
 
-        print(f"📁 Uploading {file_path.name} ({self._format_size(file_size)})...")
+        file_path = Path(file_path_str)
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File not found at: {file_path}")
 
-        # EXACT match to TypeScript multipart logic:
-        # const minimumMultipartThreshold = 100 * 1024 * 1024;
-        # const useMultipart = size > minimumMultipartThreshold;
-        use_multipart = file_size > self.MULTIPART_THRESHOLD
-
-        # Read file content
+        file_size = file_path.stat().st_size
+        if file_size > self.TWENTY_GIGABYTES:
+            raise ValueError("File is too large (must be less than 20 GB)")
+        
+        print(f"Uploading '{file_path.name}'...")
+        
         with open(file_path, 'rb') as f:
-            file_content = f.read()
+            plaintext = f.read()
+        
+        with tqdm(total=5, desc="Uploading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+            pbar.set_description("   Encrypting file")
+            encrypted_data, index_nonce = self.crypto.encrypt_stream(plaintext, mnemonic, bucket_id)
+            pbar.update(1)
 
-        # Generate encryption parameters - EXACT match to TypeScript crypto logic
-        bucket_id = user.get('bucket', '')
-        if not bucket_id:
-            raise ValueError("User bucket ID not found")
+            pbar.set_description("   Initializing upload")
+            start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
+            upload_details = start_response['uploads'][0]
+            upload_url = upload_details['url']
+            file_network_uuid = upload_details['uuid']
+            pbar.update(1)
 
-        # EXACT match to TypeScript: Environment.utils.generateFileKey(mnemonic, bucketId, index)
-        file_index = os.urandom(32)  # Random 32-byte index
-        encryption_key = self._generate_file_key(user['mnemonic'], bucket_id, file_index)
-        encryption_iv = os.urandom(16)  # 16-byte IV for AES
+            pbar.set_description("   Uploading data")
+            self.api.upload_chunk(upload_url, encrypted_data)
+            pbar.update(1)
 
-        # Encrypt file content - EXACT match to TypeScript AES-256-CTR
-        print("🔒 Encrypting file...")
-        encrypted_content = self.crypto.encrypt_file_stream(file_content, encryption_key, encryption_iv)
-
-        # Upload to network - matches TypeScript NetworkFacade logic
-        print("📤 Uploading to network...")
-        if use_multipart:
-            file_id = self._upload_multipart(encrypted_content, bucket_id, progress_callback)
-        else:
-            file_id = self._upload_single(encrypted_content, bucket_id, progress_callback)
-
-        # Create file entry in Drive - EXACT match to TypeScript
-        print("📝 Creating file entry...")
-        file_data = {
-            'plainName': file_path.stem,
-            'type': file_path.suffix.lstrip('.') if file_path.suffix else '',
-            'size': file_size,
-            'folderId': destination_folder_uuid,  # Note: API might expect folderId not folder_id
-            'fileId': file_id,
-            'bucket': bucket_id,
-            'encryptVersion': 'AES03',  # TypeScript standard
-        }
-
-        try:
-            drive_file = self.api.create_file_entry(file_data)
-            print(f"✅ File uploaded successfully!")
-            return drive_file
-        except Exception as e:
-            print(f"Warning: File uploaded but failed to create drive entry: {e}")
-            # Return basic file info even if drive entry creation fails
-            return {
-                'uuid': file_id,
-                'plainName': file_path.stem,
-                'type': file_path.suffix.lstrip('.') if file_path.suffix else '',
-                'size': file_size
+            pbar.set_description("   Finalizing network upload")
+            finish_payload = {
+                'index': index_nonce.hex(),
+                'shards': [{'hash': hashlib.sha256(encrypted_data).hexdigest(), 'uuid': file_network_uuid}]
             }
+            finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+            network_file_id = finish_response['id']
+            pbar.update(1)
 
-    def _upload_single(self, encrypted_content: bytes, bucket_id: str, progress_callback=None) -> str:
+            pbar.set_description("   Creating file metadata")
+            file_entry_payload = {
+                'folderUuid': destination_folder_uuid,
+                'plainName': file_path.stem,
+                'type': file_path.suffix.lstrip('.'),
+                'size': file_size,
+                'bucket': bucket_id,
+                'fileId': network_file_id,
+                'encryptVersion': 'AES03',
+                'name': "DEPRECATED"
+            }
+            created_file = self.api.create_file_entry(file_entry_payload)
+            pbar.update(1)
+        
+        print(f"✅ Success! File '{created_file.get('plainName')}' uploaded with UUID: {created_file.get('uuid')}")
+        return created_file
+
+    def download_file(self, file_uuid: str, destination_path_str: str):
         """
-        Upload file in single request - EXACT match to TypeScript Environment.upload
-        """
-        try:
-            # Get upload URL - matches TypeScript network API
-            upload_info = self.api.get_upload_urls(bucket_id, len(encrypted_content))
-            upload_url = upload_info.get('url', '')
-            file_id = upload_info.get('fileId', upload_info.get('id', ''))
-
-            if not upload_url or not file_id:
-                raise ValueError("Failed to get upload URL from network")
-
-            # Upload with progress tracking
-            with tqdm(total=len(encrypted_content), unit='B', unit_scale=True, desc="Uploading") as pbar:
-                def update_progress(current, total):
-                    pbar.update(current - pbar.n)
-                    if progress_callback:
-                        progress_callback(int(100 * current / total))
-
-                # Perform upload - matches TypeScript network call
-                self.api.upload_file_chunk(upload_url, encrypted_content)
-                update_progress(len(encrypted_content), len(encrypted_content))
-
-            if progress_callback:
-                progress_callback(100)
-
-            return file_id
-            
-        except Exception as e:
-            raise ValueError(f"Upload failed: {e}")
-
-    def _upload_multipart(self, encrypted_content: bytes, bucket_id: str, progress_callback=None) -> str:
-        """
-        Upload file in multiple chunks - EXACT match to TypeScript Environment.uploadMultipartFile
-        """
-        file_size = len(encrypted_content)
-        num_chunks = (file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
-
-        print(f"📦 Uploading in {num_chunks} parts...")
-
-        # For this implementation, we'll use simplified multipart (single chunk for now)
-        # A full implementation would split into chunks and upload each separately
-        return self._upload_single(encrypted_content, bucket_id, progress_callback)
-
-    def download_file(self, file_uuid: str, output_path: str = None, progress_callback=None) -> str:
-        """
-        Download and decrypt a file - EXACT match to TypeScript NetworkFacade.downloadToStream
+        Downloads and decrypts a file from Internxt Drive, following the SDK blueprint.
         """
         credentials = self.auth.get_auth_details()
         user = credentials['user']
+        mnemonic = user['mnemonic']
+        network_auth = self._get_network_auth(user)
+        
+        print(f"Downloading file with UUID: {file_uuid}...")
 
-        # Get file metadata
-        print("📋 Getting file metadata...")
-        try:
-            file_metadata = self.api.get_file_metadata(file_uuid)
-        except Exception as e:
-            raise ValueError(f"Failed to get file metadata: {e}")
+        with tqdm(total=5, desc="Downloading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+            pbar.set_description("   Fetching file metadata")
+            metadata = self.api.get_file_metadata(file_uuid)
+            bucket_id = metadata['bucket']
+            network_file_id = metadata['fileId']
+            file_size = int(metadata['size'])
+            file_name = metadata.get('plainName', 'downloaded_file')
+            file_type = metadata.get('type')
+            if file_type:
+                file_name = f"{file_name}.{file_type}"
+            pbar.update(1)
 
-        # Extract file information
-        file_name = file_metadata.get('plainName', 'unknown')
-        file_type = file_metadata.get('type', '')
-        file_size = file_metadata.get('size', 0)
-        bucket_id = file_metadata.get('bucket', '')
-        file_id = file_metadata.get('fileId', file_metadata.get('id', ''))
+            pbar.set_description("   Fetching download links")
+            links_response = self.api.get_download_links(bucket_id, network_file_id, auth=network_auth)
+            download_url = links_response['shards'][0]['url']
+            index_hex = links_response['index']
+            pbar.update(1)
 
-        if file_type:
-            file_name_full = f"{file_name}.{file_type}"
-        else:
-            file_name_full = file_name
+            pbar.set_description("   Downloading encrypted data")
+            encrypted_data = self.api.download_chunk(download_url)
+            pbar.update(1)
 
-        # Determine output path
-        if not output_path:
-            output_path = Path.cwd() / file_name_full
-        else:
-            output_path = Path(output_path)
-            if output_path.is_dir():
-                output_path = output_path / file_name_full
+            pbar.set_description("   Decrypting file")
+            decrypted_data = self.crypto.decrypt_stream(encrypted_data, mnemonic, bucket_id, index_hex)
+            decrypted_data = decrypted_data[:file_size]
+            pbar.update(1)
 
-        print(f"💾 Downloading {file_name_full} ({self._format_size(file_size)})...")
+            destination_path = Path(destination_path_str)
+            if destination_path.is_dir():
+                destination_path = destination_path / file_name
 
-        # Get download URLs - matches TypeScript network API
-        try:
-            download_info = self.api.get_download_urls(bucket_id, file_id)
-            if isinstance(download_info, list):
-                download_urls = download_info
-            else:
-                download_urls = download_info.get('urls', download_info.get('downloadUrls', []))
-        except Exception as e:
-            raise ValueError(f"Failed to get download URLs: {e}")
-
-        if not download_urls:
-            raise ValueError("No download URLs available")
-
-        # Download encrypted content
-        print("⬇️  Downloading from network...")
-        encrypted_content = b""
-
-        with tqdm(total=file_size, unit='B', unit_scale=True, desc="Downloading") as pbar:
-            for url_info in download_urls:
-                if isinstance(url_info, str):
-                    url = url_info
-                else:
-                    url = url_info.get('url', '')
-                    
-                if url:
-                    try:
-                        chunk = self.api.download_file_chunk(url)
-                        encrypted_content += chunk
-                        pbar.update(len(chunk))
-                        if progress_callback:
-                            progress_callback(int(100 * len(encrypted_content) / file_size))
-                    except Exception as e:
-                        print(f"Warning: Failed to download chunk: {e}")
-                        continue
-
-        if not encrypted_content:
-            raise ValueError("Failed to download file content")
-
-        # Generate decryption parameters - EXACT match to TypeScript
-        # In real implementation, these would come from file metadata
-        # For now, we'll use a simplified approach
-        file_index = hashlib.sha256(file_id.encode()).digest()[:32]
-        decryption_key = self._generate_file_key(user['mnemonic'], bucket_id, file_index)
-        decryption_iv = os.urandom(16)  # Should come from file metadata in real implementation
-
-        # Decrypt content - EXACT match to TypeScript NetworkFacade.decryptStream
-        print("🔓 Decrypting file...")
-        try:
-            # Create input slices list as expected by crypto service
-            input_slices = [encrypted_content]
-            decrypted_content = self.crypto.decrypt_stream(
-                input_slices, decryption_key, decryption_iv
-            )
-        except Exception as e:
-            raise ValueError(f"Decryption failed: {e}")
-
-        # Trim to actual file size (remove any padding)
-        if len(decrypted_content) > file_size:
-            decrypted_content = decrypted_content[:file_size]
-
-        # Save to file
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, 'wb') as f:
-                f.write(decrypted_content)
-        except Exception as e:
-            raise ValueError(f"Failed to save file: {e}")
-
-        print(f"✅ File downloaded successfully to: {output_path}")
-        return str(output_path)
+            pbar.set_description(f"   Saving file")
+            with open(destination_path, 'wb') as f:
+                f.write(decrypted_data)
+            pbar.update(1)
+        
+        print(f"✅ Success! File downloaded and saved to '{destination_path}'.")
+        return str(destination_path)
 
     def _generate_file_key(self, mnemonic: str, bucket_id: str, file_index: bytes) -> bytes:
         """
