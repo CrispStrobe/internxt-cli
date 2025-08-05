@@ -11,26 +11,20 @@ try:
 except FileNotFoundError:
     long_description = "A Python CLI for Internxt encrypted cloud storage"
 
-# Read requirements
-requirements_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
-try:
-    with open(requirements_path, "r", encoding="utf-8") as fh:
-        requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
-except FileNotFoundError:
-    requirements = [
-        "requests>=2.31.0",
-        "cryptography>=41.0.0",
-        "mnemonic>=0.20",
-        "click>=8.1.0",
-        "pathlib>=1.0.1",
-        "tqdm>=4.65.0",
-        "keyring>=24.0.0",
-        "Flask>=2.3.0",
-        "Werkzeug>=2.3.0"
-    ]
+# Required dependencies - includes all needed packages
+requirements = [
+    "requests>=2.31.0",
+    "cryptography>=41.0.0",
+    "mnemonic>=0.20",          # ✅ Added missing mnemonic package
+    "click>=8.1.0",
+    "tqdm>=4.65.0",
+    "keyring>=24.0.0",
+    "Flask>=2.3.0",            # Optional for WebDAV
+    "Werkzeug>=2.3.0"          # Optional for WebDAV
+]
 
 setup(
-    name="internxt-cli",
+    name="internxt-python-cli",        # ✅ Changed name to avoid conflicts
     version="1.0.0",
     author="Internxt Python CLI",
     author_email="hello@internxt.com",
@@ -55,7 +49,8 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "internxt=internxt_cli.cli:cli",
+            "inxt=cli:cli",              # ✅ Changed command name to "inxt" (shorter, no conflicts)
+            "internxt-py=cli:cli",       # ✅ Alternative command name
         ],
     },
     include_package_data=True,
