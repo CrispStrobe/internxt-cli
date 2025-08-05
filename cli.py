@@ -191,21 +191,19 @@ def whoami():
 @cli.command()
 @click.option('--folder-id', help='Folder ID to list (defaults to root)')
 @click.option('--detailed', '-d', is_flag=True, help='Show detailed information')
-def list(folder_id: Optional[str], detailed: bool):
+def list(folder_id, detailed):
     """List files and folders - matches TypeScript list command"""
     try:
-        # Ensure authentication using EXACT TypeScript logic
         credentials = auth_service.get_auth_details()
         
         if not folder_id:
             folder_id = credentials['user'].get('rootFolderId', '')
             if not folder_id:
-                click.echo("❌ No root folder ID found", err=True)
+                click.echo("❌ No root folder ID found. Please try logging in again.", err=True)
                 return
         
         click.echo(f"📂 Listing contents of folder: {folder_id}")
         
-        # Use EXACT TypeScript DriveFolderService.getFolderContent() logic
         contents = drive_service.get_folder_content(folder_id)
         
         folders = contents.get('folders', [])
@@ -215,7 +213,6 @@ def list(folder_id: Optional[str], detailed: bool):
             click.echo("📭 Folder is empty")
             return
         
-        # Display folders
         if folders:
             click.echo(f"\n📁 Folders ({len(folders)}):")
             for folder in folders:
@@ -226,7 +223,6 @@ def list(folder_id: Optional[str], detailed: bool):
                 else:
                     click.echo(f"  📁 {name}")
         
-        # Display files  
         if files:
             click.echo(f"\n📄 Files ({len(files)}):")
             for file in files:
@@ -234,7 +230,13 @@ def list(folder_id: Optional[str], detailed: bool):
                 file_type = file.get('type', '')
                 if file_type:
                     name = f"{name}.{file_type}"
-                size = file.get('size', 0)
+                
+                # FIXED: Convert size string from API to an integer before using it.
+                try:
+                    size = int(file.get('size', 0))
+                except (ValueError, TypeError):
+                    size = 0 # Default to 0 if conversion fails
+                
                 created_at = file.get('createdAt', '')
                 
                 if detailed:
@@ -245,18 +247,9 @@ def list(folder_id: Optional[str], detailed: bool):
                         click.echo(f"  📄 {name} ({size_str})")
                 else:
                     click.echo(f"  📄 {name} ({format_size(size)})")
-        
-        total_items = len(folders) + len(files)
-        click.echo(f"\n📊 Total: {total_items} items ({len(folders)} folders, {len(files)} files)")
-        
     except Exception as e:
-        error_msg = str(e)
-        if "MissingCredentialsError" in error_msg:
-            click.echo("❌ Not logged in. Use 'python cli.py login' first.", err=True)
-        elif "ExpiredCredentialsError" in error_msg:
-            click.echo("❌ Login expired. Please log in again.", err=True)
-        else:
-            click.echo(f"❌ Error listing folder: {error_msg}", err=True)
+        click.echo(f"❌ Error listing folder: {e}", err=True)
+        sys.exit(1)
 
 
 @cli.command()

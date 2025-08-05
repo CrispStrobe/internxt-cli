@@ -1,4 +1,3 @@
-# ==> services/auth.py <==
 #!/usr/bin/env python3
 """
 internxt_cli/services/auth.py
@@ -36,13 +35,13 @@ class AuthService:
         Performs the full login flow and decrypts credentials,
         matching the logic step-by-step from the TypeScript `auth.service.ts` blueprint.
         """
-        # Step 1: Get security details
+        # Step 1: Get security details (sKey/encryptedSalt) as defined in the SDK.
         security_details = self.api.security_details(email)
         encrypted_salt = security_details.get('sKey')
         if not encrypted_salt:
             raise ValueError("Login failed: Did not receive encryptedSalt (sKey) from security details.")
         
-        # Step 2: Perform client-side crypto operations
+        # Step 2: Perform client-side crypto operations as defined in the SDK blueprint.
         print("   Performing client-side crypto operations...")
         encrypted_password_hash = self.crypto.encrypt_password_hash(password, encrypted_salt)
         keys_payload = self.crypto.generate_keys(password)
@@ -77,16 +76,12 @@ class AuthService:
         # Step 5: Decrypt credentials for local use
         clear_mnemonic = self.crypto.decrypt_text_with_key(user_data['mnemonic'], password)
         
-        # FIXED: The privateKey from the server is Base64 encoded, not hex. We must decode it first.
         clear_private_key = ""
         encrypted_pk_b64 = user_data.get('privateKey')
         if encrypted_pk_b64:
             try:
-                # The server sends the private key in Base64, but the decryptor expects hex.
-                # We decode from Base64 to bytes, then re-encode to a hex string.
                 encrypted_pk_hex = base64.b64decode(encrypted_pk_b64).hex()
                 decrypted_pk_string = self.crypto.decrypt_text_with_key(encrypted_pk_hex, password)
-                # The final object stores the plaintext key as Base64, as per the TS blueprint.
                 clear_private_key = base64.b64encode(decrypted_pk_string.encode()).decode()
             except Exception as e:
                 print(f"   ⚠️  Warning: Failed to decrypt private key due to format issue: {e}")
@@ -103,7 +98,7 @@ class AuthService:
         """Login wrapper that saves credentials."""
         credentials = self.do_login(email, password, tfa_code)
         self.config.save_user_credentials(credentials)
-        self.api.set_auth_tokens(credentials.get('newToken'))
+        self.api.set_auth_tokens(credentials.get('token'), credentials.get('newToken'))
         return credentials
     
     def refresh_user_tokens(self, old_creds: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,13 +111,16 @@ class AuthService:
         login_creds = self.config.read_user_credentials()
         if not login_creds or not all(k in login_creds for k in ['newToken', 'token']) or not login_creds.get('user', {}).get('mnemonic'):
             raise ValueError("MissingCredentialsError: No valid credentials found. Please login.")
-        self.api.set_auth_tokens(login_creds.get('newToken'))
+        
+        # FIXED: Pass both token and newToken, as expected by the baseline ApiClient.set_auth_tokens
+        self.api.set_auth_tokens(login_creds.get('token'), login_creds.get('newToken'))
         return login_creds
     
     def logout(self) -> None:
         """Logout user and clear local credentials."""
         self.config.clear_user_credentials()
-        self.api.set_auth_tokens(None)
+        # Pass both arguments to clear tokens
+        self.api.set_auth_tokens(None, None)
         print("   ✅ Local credentials cleared.")
     
     def whoami(self) -> Optional[Dict[str, Any]]:
