@@ -772,6 +772,214 @@ def webdav_mount():
         click.echo(f"❌ Error getting mount instructions: {e}", err=True)
         sys.exit(1)
 
+# Add these commands to your cli.py file in the WebDAV section
+
+@cli.command('webdav-test')
+def webdav_test():
+    """Test WebDAV server connection and functionality"""
+    try:
+        status = webdav_server.status()
+        
+        if not status['running']:
+            click.echo(f"❌ WebDAV server is not running")
+            click.echo(f"💡 Start with: python cli.py webdav-start")
+            sys.exit(1)
+        
+        click.echo(f"🧪 Testing WebDAV server connection...")
+        click.echo(f"🌐 Server URL: {status['url']}")
+        
+        # Test server connection
+        test_result = webdav_server.test_connection()
+        
+        if test_result['success']:
+            click.echo(f"✅ {test_result['message']}")
+            click.echo(f"📡 Status Code: {test_result['status_code']}")
+            
+            # Show some useful headers
+            headers = test_result.get('headers', {})
+            if 'Allow' in headers:
+                click.echo(f"🔧 Supported Methods: {headers['Allow']}")
+            if 'DAV' in headers:
+                click.echo(f"🔧 DAV Compliance: {headers['DAV']}")
+            if 'Server' in headers:
+                click.echo(f"🔧 Server: {headers['Server']}")
+        else:
+            click.echo(f"❌ {test_result['message']}")
+            if 'status_code' in test_result:
+                click.echo(f"📡 Status Code: {test_result['status_code']}")
+        
+        # Test with network utils
+        click.echo(f"\n🔍 Testing with external connection...")
+        from services.network_utils import NetworkUtils
+        
+        external_test = NetworkUtils.test_webdav_connection(
+            status['url'], 
+            'internxt', 
+            'internxt-webdav'
+        )
+        
+        if external_test['success']:
+            click.echo(f"✅ External connection test passed")
+            click.echo(f"🔧 WebDAV Support: {'Yes' if external_test['webdav_supported'] else 'No'}")
+            click.echo(f"🔧 Server: {external_test['server']}")
+        else:
+            click.echo(f"❌ External connection test failed: {external_test['message']}")
+        
+        # Show mount instructions
+        click.echo(f"\n💡 If tests pass but you can't mount, try:")
+        click.echo(f"   python cli.py webdav-mount")
+        
+    except Exception as e:
+        click.echo(f"❌ Error testing WebDAV server: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command('webdav-debug')
+def webdav_debug():
+    """Show detailed WebDAV server debugging information"""
+    try:
+        click.echo(f"🔍 WebDAV Server Debug Information")
+        click.echo(f"=" * 50)
+        
+        # Server status
+        status = webdav_server.status()
+        click.echo(f"📊 Server Status:")
+        click.echo(f"   Running: {'✅ Yes' if status['running'] else '❌ No'}")
+        
+        if status['running']:
+            click.echo(f"   URL: {status['url']}")
+            click.echo(f"   Protocol: {status['protocol']}")
+            click.echo(f"   Host: {status['host']}")
+            click.echo(f"   Port: {status['port']}")
+        
+        # SSL Certificate status
+        click.echo(f"\n🔐 SSL Certificate Information:")
+        from services.network_utils import NetworkUtils
+        
+        cert_info = NetworkUtils.validate_ssl_certificates()
+        if cert_info['valid']:
+            click.echo(f"   Status: ✅ Valid")
+            click.echo(f"   Days until expiry: {cert_info['days_until_expiry']}")
+            click.echo(f"   Subject: {cert_info['subject']}")
+        else:
+            click.echo(f"   Status: ❌ {cert_info['message']}")
+        
+        # Configuration
+        webdav_config = config_service.read_webdav_config()
+        click.echo(f"\n⚙️  WebDAV Configuration:")
+        click.echo(f"   Protocol: {webdav_config['protocol']}")
+        click.echo(f"   Port: {webdav_config['port']}")
+        click.echo(f"   Timeout: {webdav_config['timeoutMinutes']} minutes")
+        
+        # File paths
+        click.echo(f"\n📁 File Paths:")
+        click.echo(f"   Config Dir: {config_service.internxt_cli_data_dir}")
+        click.echo(f"   SSL Certs Dir: {NetworkUtils.WEBDAV_SSL_CERTS_DIR}")
+        click.echo(f"   SSL Cert File: {NetworkUtils.WEBDAV_SSL_CERT_FILE} ({'✅' if NetworkUtils.WEBDAV_SSL_CERT_FILE.exists() else '❌'})")
+        click.echo(f"   SSL Key File: {NetworkUtils.WEBDAV_SSL_KEY_FILE} ({'✅' if NetworkUtils.WEBDAV_SSL_KEY_FILE.exists() else '❌'})")
+        
+        # Authentication status
+        click.echo(f"\n🔐 Authentication:")
+        user_info = auth_service.whoami()
+        if user_info:
+            click.echo(f"   Status: ✅ Logged in as {user_info['email']}")
+        else:
+            click.echo(f"   Status: ❌ Not logged in")
+        
+        # Network tests
+        if status['running']:
+            click.echo(f"\n🌐 Network Tests:")
+            
+            # Test local connectivity
+            import socket
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                result = sock.connect_ex((status['host'], status['port']))
+                sock.close()
+                
+                if result == 0:
+                    click.echo(f"   Port {status['port']}: ✅ Open")
+                else:
+                    click.echo(f"   Port {status['port']}: ❌ Closed/Filtered")
+            except Exception as e:
+                click.echo(f"   Port Test: ❌ Error: {e}")
+            
+            # Test WebDAV response
+            try:
+                import requests
+                from requests.auth import HTTPBasicAuth
+                
+                auth = HTTPBasicAuth('internxt', 'internxt-webdav')
+                response = requests.options(status['url'], auth=auth, timeout=5, verify=False)
+                click.echo(f"   WebDAV Response: ✅ {response.status_code}")
+                
+                if 'Allow' in response.headers:
+                    methods = response.headers['Allow'].split(', ')
+                    webdav_methods = [m for m in methods if m in ['PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY', 'MOVE', 'LOCK', 'UNLOCK']]
+                    click.echo(f"   WebDAV Methods: {', '.join(webdav_methods) if webdav_methods else 'None detected'}")
+                
+            except Exception as e:
+                click.echo(f"   WebDAV Test: ❌ {e}")
+        
+        # Troubleshooting tips
+        click.echo(f"\n💡 Troubleshooting Tips:")
+        if not status['running']:
+            click.echo(f"   1. Start the server: python cli.py webdav-start")
+        else:
+            click.echo(f"   1. Try connecting via browser: {status['url']}")
+            click.echo(f"   2. Test with curl: curl -u internxt:internxt-webdav {status['url']}")
+            click.echo(f"   3. Check firewall/antivirus software")
+            click.echo(f"   4. Try a different port: python cli.py webdav-start --port 8080")
+            
+    except Exception as e:
+        click.echo(f"❌ Error getting debug information: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command('webdav-regenerate-ssl')
+def webdav_regenerate_ssl():
+    """Regenerate SSL certificates for WebDAV server"""
+    try:
+        click.echo(f"🔐 Regenerating SSL certificates for WebDAV server...")
+        
+        from services.network_utils import NetworkUtils
+        
+        # Remove existing certificates
+        if NetworkUtils.WEBDAV_SSL_CERT_FILE.exists():
+            NetworkUtils.WEBDAV_SSL_CERT_FILE.unlink()
+            click.echo(f"🗑️  Removed old certificate")
+        
+        if NetworkUtils.WEBDAV_SSL_KEY_FILE.exists():
+            NetworkUtils.WEBDAV_SSL_KEY_FILE.unlink()
+            click.echo(f"🗑️  Removed old private key")
+        
+        # Generate new certificates
+        ssl_certs = NetworkUtils.generate_new_selfsigned_certs()
+        
+        click.echo(f"✅ New SSL certificates generated successfully")
+        click.echo(f"📁 Saved to: {NetworkUtils.WEBDAV_SSL_CERTS_DIR}")
+        
+        # Validate new certificates
+        validation = NetworkUtils.validate_ssl_certificates()
+        if validation['valid']:
+            click.echo(f"✅ Certificate validation passed")
+            click.echo(f"📅 Valid until: {validation['expiry_date']}")
+        else:
+            click.echo(f"❌ Certificate validation failed: {validation['message']}")
+        
+        click.echo(f"\n💡 Restart the WebDAV server to use the new certificates:")
+        click.echo(f"   python cli.py webdav-stop")
+        click.echo(f"   python cli.py webdav-start")
+        
+    except Exception as e:
+        click.echo(f"❌ Error regenerating SSL certificates: {e}", err=True)
+        sys.exit(1)
+
 
 @cli.command('webdav-config')
 def webdav_config():

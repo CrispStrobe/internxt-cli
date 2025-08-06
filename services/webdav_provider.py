@@ -1,26 +1,105 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/webdav_provider.py
-WebDAV Provider that presents Internxt Drive as a filesystem
+ISOLATED VERSION - Creates fresh API session for WebDAV context
 """
 
 import os
 import io
 import time
 import tempfile
+import threading
 from typing import Dict, Any, List, Optional, Iterator, Union
 from pathlib import Path
 
 try:
-    from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection, HTTP_NOT_FOUND, HTTP_FORBIDDEN
-    from wsgidav.dav_error import DAVError, HTTP_CONFLICT
+    from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection
+    from wsgidav.dav_error import DAVError, HTTP_NOT_FOUND, HTTP_FORBIDDEN, HTTP_CONFLICT
     import mimetypes
 except ImportError:
     print("❌ Missing WebDAV dependency. Install with: pip install WsgiDAV")
     raise
 
-from services.drive import drive_service
-from services.auth import auth_service
+
+class WebDAVAPIClient:
+    """Isolated API client for WebDAV context to avoid session conflicts"""
+    
+    def __init__(self):
+        self._credentials = None
+        self._api_client = None
+        self._thread_local = threading.local()
+        
+    def _get_isolated_session(self):
+        """Get a thread-local API session"""
+        if not hasattr(self._thread_local, 'api_client'):
+            print("🔍 WEBDAV: Creating fresh API session for WebDAV thread")
+            
+            # Import here to avoid circular imports and get fresh instances
+            from services.auth import auth_service
+            from utils.api import ApiClient
+            
+            # Get fresh credentials
+            self._credentials = auth_service.get_auth_details()
+            
+            # Create fresh API client instance
+            fresh_api_client = ApiClient()
+            fresh_api_client.set_auth_tokens(
+                self._credentials.get('token'), 
+                self._credentials.get('newToken')
+            )
+            
+            self._thread_local.api_client = fresh_api_client
+            print("✅ WEBDAV: Fresh API session created")
+            
+        return self._thread_local.api_client
+    
+    def get_folder_content(self, folder_uuid: str) -> Dict[str, Any]:
+        """Get folder content using isolated API session"""
+        try:
+            print(f"🔍 WEBDAV: Getting content for folder {folder_uuid}")
+            api_client = self._get_isolated_session()
+            
+            # Get folders and files separately like the CLI does
+            print("🔍 WEBDAV: Fetching folders...")
+            folders_response = api_client.get_folder_folders(folder_uuid, 0, 50)
+            folders = folders_response.get('result', folders_response.get('folders', []))
+            print(f"✅ WEBDAV: Got {len(folders)} folders")
+            
+            print("🔍 WEBDAV: Fetching files...")
+            files_response = api_client.get_folder_files(folder_uuid, 0, 50)  
+            files = files_response.get('result', files_response.get('files', []))
+            print(f"✅ WEBDAV: Got {len(files)} files")
+            
+            return {
+                'folders': folders,
+                'files': files
+            }
+            
+        except Exception as e:
+            print(f"❌ WEBDAV: Error getting folder content: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try fallback: call the original drive service from main thread
+            print("🔍 WEBDAV: Trying fallback method...")
+            try:
+                from services.drive import drive_service
+                return drive_service.get_folder_content(folder_uuid)
+            except Exception as e2:
+                print(f"❌ WEBDAV: Fallback also failed: {e2}")
+                # Return empty content rather than crashing
+                return {'folders': [], 'files': []}
+    
+    def get_credentials(self) -> Dict[str, Any]:
+        """Get cached credentials"""
+        if not self._credentials:
+            from services.auth import auth_service
+            self._credentials = auth_service.get_auth_details()
+        return self._credentials
+
+
+# Global instance for WebDAV
+webdav_api = WebDAVAPIClient()
 
 
 class InternxtDAVResource(DAVNonCollection):
@@ -29,9 +108,6 @@ class InternxtDAVResource(DAVNonCollection):
     def __init__(self, path: str, environ: dict, file_metadata: dict):
         super().__init__(path, environ)
         self.file_metadata = file_metadata
-        self._content_cache = None
-        self._content_cached_time = 0
-        self.CACHE_TIMEOUT = 300  # 5 minutes
         
     def get_content_length(self) -> int:
         """Return file size"""
@@ -47,7 +123,6 @@ class InternxtDAVResource(DAVNonCollection):
         else:
             full_name = file_name
             
-        # Use Python's mimetypes module to guess content type
         content_type, _ = mimetypes.guess_type(full_name)
         return content_type or 'application/octet-stream'
     
@@ -78,89 +153,37 @@ class InternxtDAVResource(DAVNonCollection):
     def get_etag(self) -> str:
         """Return ETag for caching"""
         file_uuid = self.file_metadata.get('uuid', '')
-        modified = self.get_last_modified()
-        return f'"{file_uuid}-{int(modified)}"'
+        modified = int(self.get_last_modified())
+        return f'"{file_uuid}-{modified}"'
+    
+    def support_etag(self) -> bool:
+        """FIXED: Implement required abstract method - Support ETags for caching"""
+        return True
+    
+    def support_ranges(self) -> bool:
+        """Support byte ranges for resumable downloads"""
+        return True
+    
+    def support_content_length(self) -> bool:
+        """Support content length"""
+        return True
+    
+    def support_modified(self) -> bool:
+        """Support last modified date"""
+        return True
     
     def get_content(self) -> Iterator[bytes]:
-        """Stream file content (download and decrypt on demand)"""
-        # Check cache first
-        current_time = time.time()
-        if (self._content_cache is not None and 
-            current_time - self._content_cached_time < self.CACHE_TIMEOUT):
-            yield self._content_cache
-            return
-            
-        try:
-            # Download file to temporary location
-            file_uuid = self.file_metadata['uuid']
-            
-            with tempfile.NamedTemporaryFile() as temp_file:
-                # Download and decrypt file
-                drive_service.download_file(file_uuid, temp_file.name)
-                
-                # Read and cache content
-                temp_file.seek(0)
-                content = temp_file.read()
-                
-                # Cache for future requests
-                self._content_cache = content
-                self._content_cached_time = current_time
-                
-                yield content
-                
-        except Exception as e:
-            raise DAVError(HTTP_NOT_FOUND, f"Failed to download file: {e}")
-    
-    def begin_write(self, content_type: str = None) -> io.BytesIO:
-        """Begin writing to file (for PUT operations)"""
-        return io.BytesIO()
-    
-    def end_write(self, with_errors: bool, stream: io.BytesIO) -> None:
-        """Complete file write (upload encrypted content)"""
-        if with_errors:
-            return
-            
-        try:
-            # Get file content from stream
-            stream.seek(0)
-            content = stream.read()
-            
-            # Create temporary file with content
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                temp_file.write(content)
-                temp_file.flush()
-                
-                try:
-                    # Parse path to get folder
-                    path_parts = self.path.strip('/').split('/')
-                    file_name = path_parts[-1]
-                    folder_path = '/' + '/'.join(path_parts[:-1]) if len(path_parts) > 1 else '/'
-                    
-                    # Resolve destination folder
-                    if folder_path == '/':
-                        credentials = auth_service.get_auth_details()
-                        folder_uuid = credentials['user'].get('rootFolderId', '')
-                    else:
-                        resolved = drive_service.resolve_path(folder_path)
-                        if resolved['type'] != 'folder':
-                            raise DAVError(HTTP_CONFLICT, f"Parent is not a folder: {folder_path}")
-                        folder_uuid = resolved['uuid']
-                    
-                    # Upload file
-                    drive_service.upload_file(temp_file.name, folder_uuid)
-                    
-                    # Clear cache
-                    self._content_cache = None
-                    
-                finally:
-                    # Clean up temporary file
-                    try:
-                        os.unlink(temp_file.name)
-                    except OSError:
-                        pass
-                        
-        except Exception as e:
-            raise DAVError(HTTP_FORBIDDEN, f"Failed to upload file: {e}")
+        """Stream file content - Return dummy content for now"""
+        # For debugging, return dummy content
+        # TODO: Implement actual file download
+        file_name = self.file_metadata.get('plainName', 'unknown')
+        file_type = self.file_metadata.get('type', 'txt')
+        content = f"DEBUG: This is file {file_name}.{file_type} from Internxt Drive\n"
+        content += f"UUID: {self.file_metadata.get('uuid', 'unknown')}\n"
+        content += f"Size: {self.file_metadata.get('size', 0)} bytes\n"
+        content += f"Path: {self.path}\n"
+        content += f"Created: {self.file_metadata.get('createdAt', 'unknown')}\n"
+        yield content.encode('utf-8')
 
 
 class InternxtDAVCollection(DAVCollection):
@@ -171,26 +194,34 @@ class InternxtDAVCollection(DAVCollection):
         self.folder_metadata = folder_metadata or {}
         self._content_cache = None
         self._content_cached_time = 0
-        self.CACHE_TIMEOUT = 60  # 1 minute for folders
+        self.CACHE_TIMEOUT = 30  # 30 seconds
         
     def get_member_names(self) -> List[str]:
         """Return list of files and folders in this directory"""
         try:
-            return self._get_cached_content()['names']
+            print(f"🔍 WEBDAV: get_member_names() for path: {self.path}")
+            content = self._get_content()
+            names = content.get('names', [])
+            print(f"✅ WEBDAV: Returning {len(names)} member names: {names}")
+            return names
         except Exception as e:
-            print(f"Error getting member names for {self.path}: {e}")
+            print(f"❌ WEBDAV: Error getting member names for {self.path}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_member(self, name: str) -> Optional[Union[DAVCollection, DAVNonCollection]]:
         """Get a specific member (file or folder) by name"""
         try:
-            content = self._get_cached_content()
+            print(f"🔍 WEBDAV: get_member({name}) for path: {self.path}")
+            content = self._get_content()
             
             # Check if it's a folder
             for folder in content['folders']:
                 folder_name = folder.get('plainName', folder.get('name', ''))
                 if folder_name == name:
                     child_path = f"{self.path.rstrip('/')}/{name}"
+                    print(f"✅ WEBDAV: Found folder: {name}")
                     return InternxtDAVCollection(child_path, self.environ, folder)
             
             # Check if it's a file
@@ -201,65 +232,17 @@ class InternxtDAVCollection(DAVCollection):
                 
                 if display_name == name:
                     child_path = f"{self.path.rstrip('/')}/{name}"
+                    print(f"✅ WEBDAV: Found file: {name}")
                     return InternxtDAVResource(child_path, self.environ, file)
             
+            print(f"❌ WEBDAV: Member '{name}' not found in {self.path}")
             return None
             
         except Exception as e:
-            print(f"Error getting member {name} from {self.path}: {e}")
+            print(f"❌ WEBDAV: Error getting member {name}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
-    
-    def create_empty_resource(self, name: str) -> DAVNonCollection:
-        """Create a new empty file"""
-        child_path = f"{self.path.rstrip('/')}/{name}"
-        
-        # Create placeholder metadata for new file
-        file_metadata = {
-            'plainName': Path(name).stem,
-            'type': Path(name).suffix.lstrip('.') if Path(name).suffix else '',
-            'size': 0,
-            'uuid': 'new-file',  # Will be updated after upload
-        }
-        
-        # Clear cache since we're adding a new file
-        self._content_cache = None
-        
-        return InternxtDAVResource(child_path, self.environ, file_metadata)
-    
-    def create_collection(self, name: str) -> DAVCollection:
-        """Create a new folder"""
-        try:
-            # Resolve current folder UUID
-            if self.path == '/':
-                credentials = auth_service.get_auth_details()
-                parent_uuid = credentials['user'].get('rootFolderId', '')
-            else:
-                resolved = drive_service.resolve_path(self.path)
-                parent_uuid = resolved['uuid']
-            
-            # Create folder
-            new_folder = drive_service.create_folder(name, parent_uuid)
-            
-            # Clear cache
-            self._content_cache = None
-            
-            child_path = f"{self.path.rstrip('/')}/{name}"
-            return InternxtDAVCollection(child_path, self.environ, new_folder)
-            
-        except Exception as e:
-            raise DAVError(HTTP_FORBIDDEN, f"Failed to create folder: {e}")
-    
-    def delete(self) -> None:
-        """Delete this folder"""
-        try:
-            if self.path == '/':
-                raise DAVError(HTTP_FORBIDDEN, "Cannot delete root folder")
-            
-            # Use trash instead of permanent delete for safety
-            drive_service.trash_by_path(self.path)
-            
-        except Exception as e:
-            raise DAVError(HTTP_FORBIDDEN, f"Failed to delete folder: {e}")
     
     def get_creation_date(self) -> float:
         """Return folder creation time"""
@@ -285,89 +268,124 @@ class InternxtDAVCollection(DAVCollection):
             pass
         return time.time()
     
-    def _get_cached_content(self) -> Dict[str, Any]:
+    def get_etag(self) -> str:
+        """Return ETag for folder caching"""
+        folder_uuid = self.folder_metadata.get('uuid', 'root')
+        modified = int(self.get_last_modified())
+        member_count = len(self._get_content().get('names', []))
+        return f'"{folder_uuid}-{modified}-{member_count}"'
+    
+    def support_etag(self) -> bool:
+        """FIXED: Implement required abstract method - Support ETags for caching"""
+        return True
+    
+    def support_ranges(self) -> bool:
+        """Support byte ranges"""
+        return False  # Collections don't support ranges
+    
+    def support_content_length(self) -> bool:
+        """Support content length"""
+        return False  # Collections don't have content length
+    
+    def support_modified(self) -> bool:
+        """Support last modified date"""
+        return True
+    
+    def _get_content(self) -> Dict[str, Any]:
         """Get folder content with caching"""
         current_time = time.time()
         
+        # Check cache
         if (self._content_cache is not None and 
             current_time - self._content_cached_time < self.CACHE_TIMEOUT):
+            print("✅ WEBDAV: Using cached content")
             return self._content_cache
         
-        # Get fresh content
         try:
-            content = drive_service.list_folder_with_paths(self.path)
+            print(f"🔍 WEBDAV: Fetching fresh content for: {self.path}")
             
-            # Build member names list
+            if self.path == '/' or self.path == '':
+                # Root folder - get root folder UUID and fetch content
+                credentials = webdav_api.get_credentials()
+                root_folder_uuid = credentials['user'].get('rootFolderId', '')
+                
+                if not root_folder_uuid:
+                    print("❌ WEBDAV: No root folder UUID found")
+                    return {'folders': [], 'files': [], 'names': []}
+                
+                print(f"🔍 WEBDAV: Getting root folder content: {root_folder_uuid}")
+                content = webdav_api.get_folder_content(root_folder_uuid)
+                
+            else:
+                # Non-root folder - for now return empty
+                print(f"🔍 WEBDAV: Non-root folder not implemented yet: {self.path}")
+                content = {'folders': [], 'files': []}
+            
+            # Build names list
             names = []
-            for folder in content['folders']:
+            for folder in content.get('folders', []):
                 folder_name = folder.get('plainName', folder.get('name', ''))
                 if folder_name:
                     names.append(folder_name)
             
-            for file in content['files']:
+            for file in content.get('files', []):
                 file_name = file.get('plainName', '')
                 file_type = file.get('type', '')
                 display_name = f"{file_name}.{file_type}" if file_type else file_name
                 if display_name:
                     names.append(display_name)
             
-            cached_content = {
-                'folders': content['folders'],
-                'files': content['files'],
+            result = {
+                'folders': content.get('folders', []),
+                'files': content.get('files', []),
                 'names': names
             }
             
-            self._content_cache = cached_content
+            # Cache the result
+            self._content_cache = result
             self._content_cached_time = current_time
             
-            return cached_content
+            print(f"✅ WEBDAV: Cached content - {len(names)} total items")
+            return result
             
         except Exception as e:
-            print(f"Error caching content for {self.path}: {e}")
+            print(f"❌ WEBDAV: Error getting content for {self.path}: {e}")
+            import traceback
+            traceback.print_exc()
             return {'folders': [], 'files': [], 'names': []}
 
 
 class InternxtDAVProvider(DAVProvider):
-    """WebDAV Provider for Internxt Drive"""
+    """WebDAV Provider for Internxt Drive - Isolated Version"""
     
     def __init__(self):
         super().__init__()
-        self.readonly = False  # Allow write operations
+        self.readonly = False
         
-        # Verify authentication on startup
+        print("🔍 WEBDAV: Initializing InternxtDAVProvider (Isolated Version)...")
+        
+        # Test authentication
         try:
-            auth_service.get_auth_details()
-            print("✅ WebDAV Provider initialized with valid credentials")
+            credentials = webdav_api.get_credentials()
+            user_email = credentials['user'].get('email', 'unknown')
+            print(f"✅ WEBDAV: Provider initialized with credentials for: {user_email}")
         except Exception as e:
-            print(f"❌ WebDAV Provider initialization failed: {e}")
+            print(f"❌ WEBDAV: Provider initialization failed: {e}")
             raise
     
     def get_resource_inst(self, path: str, environ: dict) -> Optional[Union[DAVCollection, DAVNonCollection]]:
         """Get DAV resource for given path"""
         try:
-            # Normalize path
             if not path.startswith('/'):
                 path = '/' + path
             
-            # Root folder
-            if path == '/':
-                return InternxtDAVCollection('/', environ)
+            print(f"🔍 WEBDAV: get_resource_inst() for path: {path}")
             
-            # Try to resolve path
-            try:
-                resolved = drive_service.resolve_path(path)
-                
-                if resolved['type'] == 'folder':
-                    return InternxtDAVCollection(path, environ, resolved['metadata'])
-                else:  # file
-                    return InternxtDAVResource(path, environ, resolved['metadata'])
-                    
-            except FileNotFoundError:
-                # Path doesn't exist - return None
-                return None
+            # Always return a collection for now (folders only)
+            return InternxtDAVCollection(path, environ)
                 
         except Exception as e:
-            print(f"Error resolving path {path}: {e}")
+            print(f"❌ WEBDAV: Error in get_resource_inst({path}): {e}")
             return None
     
     def exists(self, path: str, environ: dict) -> bool:
@@ -375,8 +393,10 @@ class InternxtDAVProvider(DAVProvider):
         try:
             if path == '/':
                 return True
-            return drive_service.resolve_path(path) is not None
-        except FileNotFoundError:
-            return False
-        except Exception:
+            
+            # For now, assume all paths exist
+            return True
+            
+        except Exception as e:
+            print(f"❌ WEBDAV: Error in exists({path}): {e}")
             return False

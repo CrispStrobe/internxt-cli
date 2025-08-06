@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/network_utils.py
-Network utilities for SSL certificate management (matches TypeScript NetworkUtils)
+Network utilities for SSL certificate management (FINAL FIXED VERSION)
 """
 
 import os
 import hashlib
+import ipaddress  # FIXED: Added missing import
 from pathlib import Path
 from typing import Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
@@ -18,7 +19,7 @@ from config.config import config_service
 
 
 class NetworkUtils:
-    """Network utilities for WebDAV SSL certificates and authentication"""
+    """Network utilities for WebDAV SSL certificates and authentication - FIXED VERSION"""
     
     WEBDAV_SSL_CERTS_DIR = config_service.internxt_cli_data_dir / "webdav-ssl"
     WEBDAV_SSL_CERT_FILE = WEBDAV_SSL_CERTS_DIR / "cert.crt"
@@ -52,12 +53,20 @@ class NetworkUtils:
                 cert_pem = cls.WEBDAV_SSL_CERT_FILE.read_bytes()
                 key_pem = cls.WEBDAV_SSL_KEY_FILE.read_bytes()
                 
-                # Check if certificate is still valid
+                # Check if certificate is still valid (FIXED: use UTC timezone-aware comparison)
                 cert = x509.load_pem_x509_certificate(cert_pem)
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 
-                if now < cert.not_valid_after:
+                # Use the new UTC-aware method if available, otherwise fall back
+                try:
+                    expiry_date = cert.not_valid_after_utc
+                except AttributeError:
+                    # Fallback for older cryptography versions
+                    expiry_date = cert.not_valid_after.replace(tzinfo=timezone.utc)
+                
+                if now < expiry_date:
                     # Certificate is still valid
+                    print("✅ Using existing SSL certificate")
                     return {
                         'cert': cert_pem,
                         'key': key_pem
@@ -73,84 +82,127 @@ class NetworkUtils:
     
     @classmethod
     def generate_new_selfsigned_certs(cls) -> Dict[str, bytes]:
-        """Generate new self-signed SSL certificates"""
+        """Generate new self-signed SSL certificates with improved configuration"""
         print("🔐 Generating new SSL certificate for WebDAV server...")
         
-        # Generate private key
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-        )
-        
-        # Create certificate
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, cls.WEBDAV_LOCAL_URL),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Internxt WebDAV"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "WebDAV Server"),
-        ])
-        
-        # Certificate valid for 1 year
-        valid_from = datetime.utcnow()
-        valid_to = valid_from + timedelta(days=365)
-        
-        cert = x509.CertificateBuilder().subject_name(
-            subject
-        ).issuer_name(
-            issuer
-        ).public_key(
-            private_key.public_key()
-        ).serial_number(
-            x509.random_serial_number()
-        ).not_valid_before(
-            valid_from
-        ).not_valid_after(
-            valid_to
-        ).add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName(cls.WEBDAV_LOCAL_URL),
+        try:
+            # Generate private key
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+            )
+            
+            # Create certificate with comprehensive subject information
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, cls.WEBDAV_LOCAL_URL),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Internxt WebDAV Server"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Local Development"),
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            ])
+            
+            # Certificate valid for 1 year (use timezone-aware datetime)
+            valid_from = datetime.now(timezone.utc)
+            valid_to = valid_from + timedelta(days=365)
+            
+            # Build certificate with comprehensive extensions
+            builder = x509.CertificateBuilder().subject_name(
+                subject
+            ).issuer_name(
+                issuer
+            ).public_key(
+                private_key.public_key()
+            ).serial_number(
+                x509.random_serial_number()
+            ).not_valid_before(
+                valid_from
+            ).not_valid_after(
+                valid_to
+            )
+            
+            # Add Subject Alternative Names for various localhost variants (FIXED)
+            san_list = [
+                x509.DNSName("localhost"),
                 x509.DNSName("127.0.0.1"),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-            ]),
-            critical=False,
-        ).add_extension(
-            x509.BasicConstraints(ca=False, path_length=None),
-            critical=True,
-        ).add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=True,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                content_commitment=False,
-                data_encipherment=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        ).sign(private_key, hashes.SHA256())
-        
-        # Serialize to PEM format
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        # Save certificates
-        cls.save_webdav_ssl_certs(cert_pem, key_pem)
-        
-        print("✅ SSL certificate generated successfully")
-        
-        return {
-            'cert': cert_pem,
-            'key': key_pem
-        }
+                x509.DNSName("::1"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),  # FIXED: Correctly use imported module
+                x509.IPAddress(ipaddress.IPv6Address("::1")),         # FIXED: Correctly use imported module
+            ]
+            
+            # Add additional localhost variants for better compatibility
+            localhost_variants = [
+                "webdav.local.internxt.com",
+                "internxt.local", 
+                "webdav.local"
+            ]
+            
+            for variant in localhost_variants:
+                san_list.append(x509.DNSName(variant))
+            
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName(san_list),
+                critical=False,
+            )
+            
+            # Add basic constraints
+            builder = builder.add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            
+            # Add key usage for web server
+            builder = builder.add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=True,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            
+            # Add extended key usage for web server
+            builder = builder.add_extension(
+                x509.ExtendedKeyUsage([
+                    x509.oid.ExtendedKeyUsageOID.SERVER_AUTH,
+                    x509.oid.ExtendedKeyUsageOID.CLIENT_AUTH,
+                ]),
+                critical=True,
+            )
+            
+            # Sign the certificate
+            cert = builder.sign(private_key, hashes.SHA256())
+            
+            # Serialize to PEM format
+            cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+            key_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            
+            # Save certificates
+            cls.save_webdav_ssl_certs(cert_pem, key_pem)
+            
+            print("✅ SSL certificate generated and saved successfully")
+            print(f"📋 Certificate valid until: {valid_to.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            
+            return {
+                'cert': cert_pem,
+                'key': key_pem
+            }
+            
+        except Exception as e:
+            print(f"❌ Failed to generate SSL certificate: {e}")
+            raise RuntimeError(f"SSL certificate generation failed: {e}")
     
     @classmethod
     def save_webdav_ssl_certs(cls, cert_pem: bytes, key_pem: bytes) -> None:
-        """Save SSL certificates to disk"""
+        """Save SSL certificates to disk with proper permissions"""
         try:
             # Ensure directory exists
             cls.WEBDAV_SSL_CERTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -163,9 +215,62 @@ class NetworkUtils:
             if os.name != 'nt':  # Unix-like systems
                 os.chmod(cls.WEBDAV_SSL_CERT_FILE, 0o600)
                 os.chmod(cls.WEBDAV_SSL_KEY_FILE, 0o600)
+            
+            print(f"📁 Certificates saved to: {cls.WEBDAV_SSL_CERTS_DIR}")
                 
         except Exception as e:
             raise RuntimeError(f"Failed to save SSL certificates: {e}")
+    
+    @classmethod
+    def validate_ssl_certificates(cls) -> Dict[str, Any]:
+        """Validate existing SSL certificates"""
+        if not cls.WEBDAV_SSL_CERT_FILE.exists() or not cls.WEBDAV_SSL_KEY_FILE.exists():
+            return {
+                'valid': False,
+                'message': 'Certificate files not found'
+            }
+        
+        try:
+            cert_pem = cls.WEBDAV_SSL_CERT_FILE.read_bytes()
+            key_pem = cls.WEBDAV_SSL_KEY_FILE.read_bytes()
+            
+            # Load and validate certificate
+            cert = x509.load_pem_x509_certificate(cert_pem)
+            private_key = serialization.load_pem_private_key(key_pem, password=None)
+            
+            # Check if certificate matches private key
+            public_key = cert.public_key()
+            if not isinstance(public_key, type(private_key.public_key())):
+                return {
+                    'valid': False,
+                    'message': 'Certificate and private key do not match'
+                }
+            
+            # Check expiry
+            now = datetime.now(timezone.utc)
+            try:
+                expiry_date = cert.not_valid_after_utc
+            except AttributeError:
+                expiry_date = cert.not_valid_after.replace(tzinfo=timezone.utc)
+            
+            is_expired = now >= expiry_date
+            days_until_expiry = (expiry_date - now).days
+            
+            return {
+                'valid': not is_expired,
+                'expired': is_expired,
+                'expiry_date': expiry_date.isoformat(),
+                'days_until_expiry': days_until_expiry,
+                'subject': cert.subject.rfc4514_string(),
+                'issuer': cert.issuer.rfc4514_string(),
+                'message': 'Valid' if not is_expired else f'Expired {abs(days_until_expiry)} days ago'
+            }
+            
+        except Exception as e:
+            return {
+                'valid': False,
+                'message': f'Certificate validation failed: {e}'
+            }
     
     @classmethod
     def parse_range_header(cls, range_header: str, file_size: int) -> Dict[str, Any]:
@@ -220,11 +325,40 @@ class NetworkUtils:
         except ValueError as e:
             print(f"Invalid range header '{range_header}': {e}")
             return None
-
-
-# Additional imports needed for IP address handling
-try:
-    import ipaddress
-except ImportError:
-    print("❌ Missing ipaddress module (should be in Python standard library)")
-    raise
+    
+    @classmethod
+    def test_webdav_connection(cls, url: str, username: str, password: str) -> Dict[str, Any]:
+        """Test WebDAV connection"""
+        try:
+            import requests
+            from requests.auth import HTTPBasicAuth
+            
+            auth = HTTPBasicAuth(username, password)
+            
+            # Test OPTIONS request (WebDAV discovery)
+            response = requests.options(
+                url, 
+                auth=auth, 
+                timeout=10, 
+                verify=False,  # Allow self-signed certificates
+                headers={'User-Agent': 'Internxt WebDAV Test Client'}
+            )
+            
+            webdav_methods = response.headers.get('Allow', '').split(', ')
+            dav_header = response.headers.get('DAV', '')
+            
+            return {
+                'success': response.status_code in [200, 204],
+                'status_code': response.status_code,
+                'webdav_supported': 'PROPFIND' in webdav_methods or 'DAV' in response.headers,
+                'supported_methods': webdav_methods,
+                'dav_compliance': dav_header,
+                'server': response.headers.get('Server', 'Unknown'),
+                'message': 'WebDAV connection successful' if response.status_code in [200, 204] else f'HTTP {response.status_code}'
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Connection failed: {e}'
+            }
