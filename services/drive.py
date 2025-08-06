@@ -186,7 +186,11 @@ class DriveService:
             display_name = f"{file_name}.{file_type}" if file_type else file_name
             full_path = f"{base_path.rstrip('/')}/{display_name}"
             
-            size_bytes = file.get('size', 0)
+            # FIXED: Convert size string from API to integer before formatting
+            try:
+                size_bytes = int(file.get('size', 0))
+            except (ValueError, TypeError):
+                size_bytes = 0
             size_display = self._format_size(size_bytes)
             
             enhanced_files.append({
