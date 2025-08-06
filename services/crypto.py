@@ -1,12 +1,13 @@
-# ==> services/crypto.py <==
 #!/usr/bin/env python3
 """
 internxt_cli/services/crypto.py
-Cryptographic operations for Internxt CLI - EXACT match to TypeScript blueprint
+Cryptographic operations for Internxt CLI - EXACT match to TypeScript inxt-js implementation
+FIXED: Now implements the EXACT protocol from inxt-js crypto.ts
 """
 import os
 import hashlib
 import base64
+import hmac
 from typing import Tuple, Dict, Any
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -16,51 +17,197 @@ from mnemonic import Mnemonic
 
 from config.config import config_service
 
+# Exact constants from inxt-js crypto.ts
+BUCKET_META_MAGIC = bytes([
+    66, 150, 71, 16, 50, 114, 88, 160, 163, 35, 154, 65, 162, 213, 226, 215, 
+    70, 138, 57, 61, 52, 19, 210, 170, 38, 164, 162, 200, 86, 201, 2, 81
+])
+
 class CryptoService:
-    """Handles all cryptographic operations"""
+    """Handles all cryptographic operations - EXACT match to inxt-js implementation"""
 
     def __init__(self):
         self.backend = default_backend()
         self.mnemonic_gen = Mnemonic("english")
 
-    def _generate_file_key(self, mnemonic: str, bucket_id: str, index: bytes) -> bytes:
+    def generate_file_bucket_key(self, mnemonic: str, bucket_id: str) -> bytes:
         """
-        Generates a file-specific encryption key from the user's mnemonic.
-        This is a direct port of `Environment.utils.generateFileKey` from the TS blueprint.
+        EXACT implementation of GenerateFileBucketKey from inxt-js crypto.ts
         """
+        # Convert mnemonic to seed using BIP39 (exact match to mnemonicToSeed)
         seed = self.mnemonic_gen.to_seed(mnemonic)
-        key_material = seed + bucket_id.encode('utf-8') + index
-        return hashlib.sha256(key_material).digest()
+        
+        # Convert bucketId from hex string to bytes (exact match to Buffer.from(bucketId, 'hex'))
+        bucket_id_bytes = bytes.fromhex(bucket_id)
+        
+        # EXACT implementation of GetFileDeterministicKey
+        return self.get_file_deterministic_key(seed, bucket_id_bytes)
 
-    def encrypt_stream(self, data: bytes, mnemonic: str, bucket_id: str) -> Tuple[bytes, bytes]:
+    def get_file_deterministic_key(self, key: bytes, data: bytes) -> bytes:
         """
-        Encrypts file data using AES-256-CTR as defined in the blueprint.
-        Returns a tuple of (encrypted_data, index_nonce).
+        EXACT implementation of GetFileDeterministicKey from inxt-js crypto.ts
         """
-        index_nonce = os.urandom(32) # 32-byte nonce as per TS `crypto.randomBytes(crypto.algorithm.ivSize)`
-        iv = index_nonce[:16] # IV is the first 16 bytes of the index
-        key = self._generate_file_key(mnemonic, bucket_id, index_nonce)
+        hash_obj = hashlib.sha512()
+        hash_obj.update(key)
+        hash_obj.update(data)
+        return hash_obj.digest()
 
-        cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=self.backend)
+    def generate_file_key(self, mnemonic: str, bucket_id: str, index: bytes) -> bytes:
+        """
+        EXACT implementation of GenerateFileKey from inxt-js crypto.ts
+        """
+        bucket_key = self.generate_file_bucket_key(mnemonic, bucket_id)
+        return self.get_file_deterministic_key(bucket_key[:32], index)[:32]
+
+    def encrypt_stream_internxt_protocol(self, data: bytes, mnemonic: str, bucket_id: str) -> Tuple[bytes, str]:
+        """
+        Encrypts file data using Internxt's EXACT protocol from uploadV2.ts
+        Returns (encrypted_data, file_index_hex) - matches Network SDK format
+        """
+        # Generate 32-byte random index (matches randomBytes(32) from uploadV2.ts)
+        index = os.urandom(32)
+        
+        # Generate file key using EXACT Internxt protocol
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        
+        # Use first 16 bytes of index as IV (matches index.slice(0, 16) from uploadV2.ts)
+        iv = index[:16]
+        
+        # Encrypt using AES-256-CTR (matches createCipheriv('aes-256-ctr', key, iv))
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
         encryptor = cipher.encryptor()
         encrypted_data = encryptor.update(data) + encryptor.finalize()
-        return encrypted_data, index_nonce
-
-    def decrypt_stream(self, data: bytes, mnemonic: str, bucket_id: str, index_hex: str) -> bytes:
-        """
-        Decrypts file data using AES-256-CTR as defined in the blueprint.
-        """
-        index_nonce = bytes.fromhex(index_hex)
-        iv = index_nonce[:16]
-        key = self._generate_file_key(mnemonic, bucket_id, index_nonce)
         
-        cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=self.backend)
+        return encrypted_data, index.hex()
+
+    def decrypt_stream_internxt_protocol(self, encrypted_data: bytes, mnemonic: str, bucket_id: str, file_index_hex: str) -> bytes:
+        """
+        Decrypts file data using Internxt's EXACT protocol
+        Matches the decryption process from download functionality
+        """
+        index = bytes.fromhex(file_index_hex)
+        
+        # Generate file key using EXACT same protocol as encryption
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        
+        # Use first 16 bytes of index as IV
+        iv = index[:16]
+        
+        # Decrypt using AES-256-CTR
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
         decryptor = cipher.decryptor()
-        decrypted_data = decryptor.update(data) + decryptor.finalize()
+        decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
+        
         return decrypted_data
 
-    # --- Methods from baseline ---
-    
+    def encrypt_filename(self, mnemonic: str, bucket_id: str, filename: str) -> str:
+        """
+        EXACT implementation of EncryptFilename from inxt-js crypto.ts
+        """
+        bucket_key = self.generate_bucket_key(mnemonic, bucket_id)
+        
+        # Generate encryption key using BUCKET_META_MAGIC
+        encryption_key = self.generate_filename_encryption_key(bucket_key)
+        
+        # Generate encryption IV
+        encryption_iv = self.generate_filename_encryption_iv(bucket_key, bucket_id, filename)
+        
+        return self.encrypt_meta(filename, encryption_key, encryption_iv)
+
+    def decrypt_filename(self, mnemonic: str, bucket_id: str, encrypted_name: str) -> str:
+        """
+        EXACT implementation of DecryptFileName from inxt-js crypto.ts
+        """
+        bucket_key = self.generate_bucket_key(mnemonic, bucket_id)
+        
+        # Generate decryption key using BUCKET_META_MAGIC
+        key = hmac.new(
+            bytes.fromhex(bucket_key), 
+            BUCKET_META_MAGIC, 
+            hashlib.sha512
+        ).hexdigest()
+        
+        return self.decrypt_meta(encrypted_name, key)
+
+    def generate_bucket_key(self, mnemonic: str, bucket_id: str) -> str:
+        """
+        EXACT implementation of GenerateBucketKey from inxt-js crypto.ts
+        """
+        seed = self.mnemonic_gen.to_seed(mnemonic).hex()
+        
+        # EXACT implementation of GetDeterministicKey
+        sha512_input = seed + bucket_id
+        deterministic_key = hashlib.sha512(bytes.fromhex(sha512_input)).hexdigest()
+        
+        return deterministic_key[:64]
+
+    def generate_filename_encryption_key(self, bucket_key: str) -> bytes:
+        """
+        Generate encryption key for filename using BUCKET_META_MAGIC
+        """
+        hasher = hmac.new(bytes.fromhex(bucket_key), BUCKET_META_MAGIC, hashlib.sha512)
+        return hasher.digest()[:32]
+
+    def generate_filename_encryption_iv(self, bucket_key: str, bucket_id: str, filename: str) -> bytes:
+        """
+        Generate encryption IV for filename
+        """
+        hasher = hmac.new(bytes.fromhex(bucket_key), hashlib.sha512)
+        hasher.update(bucket_id.encode())
+        hasher.update(filename.encode())
+        return hasher.digest()[:32]
+
+    def encrypt_meta(self, file_meta: str, key: bytes, iv: bytes) -> str:
+        """
+        EXACT implementation of EncryptMeta from inxt-js crypto.ts using AES-256-GCM
+        """
+        cipher = Cipher(algorithms.AES(key), modes.GCM(iv[:16]), backend=self.backend)
+        encryptor = cipher.encryptor()
+        
+        cipher_text = encryptor.update(file_meta.encode('utf-8')) + encryptor.finalize()
+        auth_tag = encryptor.tag
+        
+        # Concatenate auth_tag + iv + cipher_text and encode to base64
+        result = auth_tag + iv + cipher_text
+        return base64.b64encode(result).decode('ascii')
+
+    def decrypt_meta(self, buffer_base64: str, decrypt_key: str) -> str:
+        """
+        EXACT implementation of decryptMeta from inxt-js crypto.ts
+        """
+        try:
+            data = base64.b64decode(buffer_base64)
+            
+            # Extract components (matches the TypeScript implementation)
+            GCM_DIGEST_SIZE = 16
+            SHA256_DIGEST_SIZE = 32
+            
+            digest = data[:GCM_DIGEST_SIZE]
+            iv = data[GCM_DIGEST_SIZE:GCM_DIGEST_SIZE + SHA256_DIGEST_SIZE]
+            buffer = data[GCM_DIGEST_SIZE + SHA256_DIGEST_SIZE:]
+            
+            # Create decipher with auth tag
+            key_bytes = bytes.fromhex(decrypt_key)[:32]
+            cipher = Cipher(algorithms.AES(key_bytes), modes.GCM(iv[:16], digest), backend=self.backend)
+            decryptor = cipher.decryptor()
+            
+            decrypted = decryptor.update(buffer) + decryptor.finalize()
+            return decrypted.decode('utf-8')
+            
+        except Exception:
+            return None
+
+    # Legacy methods for compatibility
+    def encrypt_stream(self, data: bytes, mnemonic: str, bucket_id: str) -> Tuple[bytes, bytes]:
+        """Legacy method - redirects to correct protocol"""
+        encrypted_data, file_index_hex = self.encrypt_stream_internxt_protocol(data, mnemonic, bucket_id)
+        return encrypted_data, bytes.fromhex(file_index_hex)
+
+    def decrypt_stream(self, data: bytes, mnemonic: str, bucket_id: str, index_hex: str) -> bytes:
+        """Legacy method - redirects to correct protocol"""
+        return self.decrypt_stream_internxt_protocol(data, mnemonic, bucket_id, index_hex)
+
+    # Configuration encryption methods (unchanged)
     def pass_to_hash(self, password: str, salt: str = None) -> dict:
         if salt is None:
             salt_bytes = os.urandom(16)

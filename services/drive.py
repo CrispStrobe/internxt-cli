@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/drive.py
-Drive operations for Internxt CLI - EXACT match to TypeScript NetworkFacade and DriveFolderService
+Drive operations for Internxt CLI - EXACT match to TypeScript NetworkFacade and upload process
+FIXED: Now implements the EXACT upload/download protocol from TypeScript SDK
 """
 
 import os
@@ -32,11 +33,7 @@ except ImportError:
 
 class DriveService:
     """
-    Handles drive operations
-    matches functionality from multiple TypeScript services:
-    - DriveFolderService (folder operations)
-    - NetworkFacade (file upload/download with encryption)
-    - Environment.utils (file key generation)
+    Handles drive operations - EXACT match to TypeScript SDK upload/download process
     """
 
     def __init__(self):
@@ -51,46 +48,26 @@ class DriveService:
 
     def _get_network_auth(self, user_creds: Dict[str, Any]) -> tuple:
         """
-        Creates the Basic Auth credentials for the Network API, as per the SDK blueprint.
+        Creates the Basic Auth credentials for the Network API.
+        EXACT match to NetworkFacade authentication in TypeScript
         """
         bridge_user = user_creds.get('bridgeUser')
         user_id = user_creds.get('userId')
         if not bridge_user or not user_id:
             raise ValueError("Missing network credentials (bridgeUser, userId)")
         
-        # As per the SDK, the password for Basic Auth is a SHA256 hash of the userId
+        # EXACT match to TypeScript: SHA256 hash of userId for password
         hashed_password = hashlib.sha256(str(user_id).encode()).hexdigest()
         return (bridge_user, hashed_password)
 
     def get_folder_content(self, folder_uuid: str) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Get folder contents
-        """
+        """Get folder contents - matches TypeScript DriveFolderService"""
         try:
-            # Ensure we have valid authentication as in TypeScript
             credentials = self.auth.get_auth_details()
             
-            # Try to get unified folder content first (some API versions support this)
-            try:
-                response = self.api.get_folder_content(folder_uuid)
-                
-                # Handle different response structures
-                if 'children' in response:
-                    folders = response['children'].get('folders', [])
-                    files = response['children'].get('files', [])
-                elif 'result' in response:
-                    result = response['result']
-                    folders = result.get('folders', [])
-                    files = result.get('files', [])
-                else:
-                    # Fallback to separate calls
-                    folders = self._get_all_folders(folder_uuid)
-                    files = self._get_all_files(folder_uuid)
-                    
-            except Exception:
-                # Fallback to separate API calls as in TypeScript
-                folders = self._get_all_folders(folder_uuid)
-                files = self._get_all_files(folder_uuid)
+            # Get folders and files separately (matches TypeScript implementation)
+            folders = self._get_all_folders(folder_uuid)
+            files = self._get_all_files(folder_uuid)
 
             return {
                 'folders': folders,
@@ -99,14 +76,10 @@ class DriveService:
             
         except Exception as e:
             print(f"Error getting folder content: {e}")
-            # Return empty result on error, don't crash
             return {'folders': [], 'files': []}
 
     def list_folder(self, folder_uuid: str = None) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        List contents of a folder - wrapper for backward compatibility
-        Uses root folder if no UUID provided
-        """
+        """List contents of a folder - wrapper for backward compatibility"""
         credentials = self.auth.get_auth_details()
 
         if not folder_uuid:
@@ -117,18 +90,12 @@ class DriveService:
         return self.get_folder_content(folder_uuid)
 
     def _get_all_folders(self, folder_uuid: str, offset: int = 0) -> List[Dict[str, Any]]:
-        """
-        Recursively get all folders in a directory with pagination
-        EXACT match to TypeScript pagination logic
-        """
+        """Recursively get all folders - EXACT match to TypeScript pagination"""
         try:
-            # EXACT match to TypeScript API call structure
             response = self.api.get_folder_folders(folder_uuid, offset, 50)
-            
-            # Handle different response structures
             folders = response.get('result', response.get('folders', []))
 
-            # EXACT match to TypeScript pagination: if len(folders) == 50, get more
+            # EXACT match to TypeScript: if len == 50, get more
             if len(folders) == 50:
                 folders.extend(self._get_all_folders(folder_uuid, offset + 50))
 
@@ -139,18 +106,12 @@ class DriveService:
             return []
 
     def _get_all_files(self, folder_uuid: str, offset: int = 0) -> List[Dict[str, Any]]:
-        """
-        Recursively get all files in a directory with pagination
-        EXACT match to TypeScript pagination logic
-        """
+        """Recursively get all files - EXACT match to TypeScript pagination"""
         try:
-            # EXACT match to TypeScript API call structure
             response = self.api.get_folder_files(folder_uuid, offset, 50)
-            
-            # Handle different response structures
             files = response.get('result', response.get('files', []))
 
-            # EXACT match to TypeScript pagination: if len(files) == 50, get more
+            # EXACT match to TypeScript: if len == 50, get more
             if len(files) == 50:
                 files.extend(self._get_all_files(folder_uuid, offset + 50))
 
@@ -161,9 +122,7 @@ class DriveService:
             return []
 
     def create_folder(self, name: str, parent_folder_uuid: str = None) -> Dict[str, Any]:
-        """
-        Create a new folder
-        """
+        """Create a new folder - matches TypeScript create folder"""
         credentials = self.auth.get_auth_details()
 
         if not parent_folder_uuid:
@@ -175,7 +134,8 @@ class DriveService:
 
     def upload_file(self, file_path_str: str, destination_folder_uuid: str = None):
         """
-        Encrypts and uploads a file to Internxt Drive, following the SDK blueprint.
+        EXACT implementation of file upload matching TypeScript NetworkFacade + DriveFileService
+        This matches the upload process from upload-file.ts and NetworkFacade
         """
         credentials = self.auth.get_auth_details()
         user = credentials['user']
@@ -194,122 +154,129 @@ class DriveService:
         if file_size > self.TWENTY_GIGABYTES:
             raise ValueError("File is too large (must be less than 20 GB)")
         
-        print(f"Uploading '{file_path.name}'...")
+        print(f"📤 Uploading '{file_path.name}' using EXACT TypeScript protocol...")
         
+        # Read file data
         with open(file_path, 'rb') as f:
             plaintext = f.read()
         
         with tqdm(total=5, desc="Uploading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
-            pbar.set_description("   Encrypting file")
-            encrypted_data, index_nonce = self.crypto.encrypt_stream(plaintext, mnemonic, bucket_id)
+            # Step 1: Encrypt using EXACT Internxt protocol
+            pbar.set_description("🔐 Encrypting with exact protocol")
+            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(plaintext, mnemonic, bucket_id)
             pbar.update(1)
 
-            pbar.set_description("   Initializing upload")
+            # Step 2: Start upload (get signed URLs)
+            pbar.set_description("🚀 Initializing network upload")
             start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
             upload_details = start_response['uploads'][0]
             upload_url = upload_details['url']
             file_network_uuid = upload_details['uuid']
             pbar.update(1)
 
-            pbar.set_description("   Uploading data")
+            # Step 3: Upload encrypted data to signed URL
+            pbar.set_description("☁️  Uploading encrypted data")
             self.api.upload_chunk(upload_url, encrypted_data)
             pbar.update(1)
 
-            pbar.set_description("   Finalizing network upload")
+            # Step 4: Finalize upload (EXACT match to TypeScript finish payload)
+            pbar.set_description("✅ Finalizing network upload")
+            # Calculate hash of encrypted data (EXACT match to TypeScript)
+            encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+            
             finish_payload = {
-                'index': index_nonce.hex(),
-                'shards': [{'hash': hashlib.sha256(encrypted_data).hexdigest(), 'uuid': file_network_uuid}]
+                'index': file_index_hex,  # EXACT: hex string, not bytes
+                'shards': [{
+                    'hash': encrypted_hash,
+                    'uuid': file_network_uuid
+                }]
             }
             finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
             network_file_id = finish_response['id']
             pbar.update(1)
 
-            pbar.set_description("   Creating file metadata")
+            # Step 5: Create Drive file entry (EXACT match to TypeScript DriveFileService)
+            pbar.set_description("📋 Creating file metadata")
             file_entry_payload = {
                 'folderUuid': destination_folder_uuid,
-                'plainName': file_path.stem,
-                'type': file_path.suffix.lstrip('.'),
-                'size': file_size,
+                'plainName': file_path.stem,  # Name without extension
+                'type': file_path.suffix.lstrip('.') if file_path.suffix else '',  # Extension without dot
+                'size': file_size,  # Original file size, not encrypted size
                 'bucket': bucket_id,
-                'fileId': network_file_id,
-                'encryptVersion': 'AES03',
-                'name': "DEPRECATED"
+                'fileId': network_file_id,  # Network file ID from finish response
+                'encryptVersion': 'Aes03',  # EXACT match to TypeScript EncryptionVersion.Aes03
+                'name': ''  # EXACT: Empty string for deprecated field
             }
             created_file = self.api.create_file_entry(file_entry_payload)
             pbar.update(1)
         
         print(f"✅ Success! File '{created_file.get('plainName')}' uploaded with UUID: {created_file.get('uuid')}")
+        print(f"🔐 Encryption index: {file_index_hex[:16]}...")
         return created_file
 
     def download_file(self, file_uuid: str, destination_path_str: str):
         """
-        Downloads and decrypts a file from Internxt Drive, following the SDK blueprint.
+        EXACT implementation of file download matching TypeScript NetworkFacade
+        This matches the download process from download-file.ts and NetworkFacade
         """
         credentials = self.auth.get_auth_details()
         user = credentials['user']
         mnemonic = user['mnemonic']
         network_auth = self._get_network_auth(user)
         
-        print(f"Downloading file with UUID: {file_uuid}...")
+        print(f"📥 Downloading file UUID: {file_uuid} using EXACT TypeScript protocol...")
 
         with tqdm(total=5, desc="Downloading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
-            pbar.set_description("   Fetching file metadata")
+            # Step 1: Get file metadata from Drive
+            pbar.set_description("📋 Fetching file metadata")
             metadata = self.api.get_file_metadata(file_uuid)
             bucket_id = metadata['bucket']
             network_file_id = metadata['fileId']
             file_size = int(metadata['size'])
+            
+            # Construct filename (EXACT match to TypeScript)
             file_name = metadata.get('plainName', 'downloaded_file')
             file_type = metadata.get('type')
             if file_type:
                 file_name = f"{file_name}.{file_type}"
             pbar.update(1)
 
-            pbar.set_description("   Fetching download links")
+            # Step 2: Get download links from Network
+            pbar.set_description("🔗 Fetching download links")
             links_response = self.api.get_download_links(bucket_id, network_file_id, auth=network_auth)
             download_url = links_response['shards'][0]['url']
-            index_hex = links_response['index']
+            file_index_hex = links_response['index']  # Encryption index
             pbar.update(1)
 
-            pbar.set_description("   Downloading encrypted data")
+            # Step 3: Download encrypted data
+            pbar.set_description("☁️  Downloading encrypted data")
             encrypted_data = self.api.download_chunk(download_url)
             pbar.update(1)
 
-            pbar.set_description("   Decrypting file")
-            decrypted_data = self.crypto.decrypt_stream(encrypted_data, mnemonic, bucket_id, index_hex)
-            decrypted_data = decrypted_data[:file_size]
+            # Step 4: Decrypt using EXACT Internxt protocol
+            pbar.set_description("🔓 Decrypting with exact protocol")
+            decrypted_data = self.crypto.decrypt_stream_internxt_protocol(
+                encrypted_data, mnemonic, bucket_id, file_index_hex
+            )
+            
+            # CRITICAL: Trim to exact file size (handles padding from AES-CTR)
+            if len(decrypted_data) > file_size:
+                decrypted_data = decrypted_data[:file_size]
             pbar.update(1)
 
+            # Step 5: Save decrypted file
             destination_path = Path(destination_path_str)
             if destination_path.is_dir():
                 destination_path = destination_path / file_name
 
-            pbar.set_description(f"   Saving file")
+            pbar.set_description(f"💾 Saving to disk")
             with open(destination_path, 'wb') as f:
                 f.write(decrypted_data)
             pbar.update(1)
         
-        print(f"✅ Success! File downloaded and saved to '{destination_path}'.")
+        print(f"✅ Success! File downloaded and saved to '{destination_path}'")
+        print(f"🔓 Decryption index: {file_index_hex[:16]}...")
         return str(destination_path)
-
-    def _generate_file_key(self, mnemonic: str, bucket_id: str, file_index: bytes) -> bytes:
-        """
-        Generate file encryption key - EXACT match to TypeScript Environment.utils.generateFileKey
-        """
-        try:
-            # This is a simplified version. The real TypeScript implementation uses:
-            # Environment.utils.generateFileKey(mnemonic, bucketId, index as Buffer)
-            
-            # Convert mnemonic to seed
-            seed = self.crypto.mnemonic_gen.to_seed(mnemonic)
-            
-            # Combine with bucket and file index as in TypeScript
-            key_material = seed + bucket_id.encode('utf-8') + file_index
-            
-            # Generate 32-byte key using SHA256
-            return hashlib.sha256(key_material).digest()
-            
-        except Exception as e:
-            raise ValueError(f"File key generation failed: {e}")
 
     def _format_size(self, size_bytes: int) -> str:
         """Convert bytes to human readable format"""
@@ -324,22 +291,22 @@ class DriveService:
         return f"{size_bytes:.1f} PB"
 
     def delete_file(self, file_uuid: str) -> Dict[str, Any]:
-        """Delete a file - EXACT match to TypeScript storage API"""
+        """Delete a file"""
         credentials = self.auth.get_auth_details()
         return self.api.delete_file(file_uuid)
 
     def delete_folder(self, folder_uuid: str) -> Dict[str, Any]:
-        """Delete a folder - EXACT match to TypeScript storage API"""  
+        """Delete a folder"""  
         credentials = self.auth.get_auth_details()
         return self.api.delete_folder(folder_uuid)
 
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
-        """Get file metadata - EXACT match to TypeScript storage API"""
+        """Get file metadata"""
         credentials = self.auth.get_auth_details()
         return self.api.get_file_metadata(file_uuid)
 
     def get_folder_metadata(self, folder_uuid: str) -> Dict[str, Any]:
-        """Get folder metadata - EXACT match to TypeScript storage API"""
+        """Get folder metadata"""
         credentials = self.auth.get_auth_details()
         return self.api.get_folder_metadata(folder_uuid)
 

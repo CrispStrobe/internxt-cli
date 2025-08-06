@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/utils/api.py
-API client for Internxt services
+API client for Internxt services - FIXED with missing methods
 """
 
 import requests
@@ -26,7 +26,7 @@ class ApiClient:
         self.session.headers.update({
             'Content-Type': 'application/json',
             'User-Agent': 'internxt-python-cli/4.0.0',
-            'Accept': 'application/json',                   # needed?
+            'Accept': 'application/json',
         })
 
     def set_auth_tokens(self, token: Optional[str], new_token: Optional[str]):
@@ -58,8 +58,10 @@ class ApiClient:
             return response
         except requests.exceptions.HTTPError as e:
             error_message = f"HTTP {e.response.status_code} Error"
-            try: error_message = e.response.json().get("message", "Unknown Error")
-            except json.JSONDecodeError: pass
+            try: 
+                error_message = e.response.json().get("message", "Unknown Error")
+            except json.JSONDecodeError: 
+                pass
             raise ValueError(f"API Error: {error_message}") from e
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Network request failed for {url}: {e}") from e
@@ -72,6 +74,11 @@ class ApiClient:
     def post(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make POST request and return JSON"""
         response = self._make_request("POST", url, data=data, headers=headers, auth=auth)
+        return response.json() if response.content else {}
+
+    def delete(self, url: str, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
+        """Make DELETE request and return JSON"""
+        response = self._make_request("DELETE", url, headers=headers, auth=auth)
         return response.json() if response.content else {}
 
     # --- AUTH API ENDPOINTS ---
@@ -90,21 +97,18 @@ class ApiClient:
     
     def get_folder_folders(self, folder_uuid: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         """Get subfolders in folder"""
-        # Corrected Endpoint: /folders/content/{uuid}/folders
         url = f"{self.drive_api_url}/folders/content/{folder_uuid}/folders"
         params = {'offset': offset, 'limit': limit, 'sort': 'plainName', 'direction': 'ASC'}
         return self.get(url, params)
 
     def get_folder_files(self, folder_uuid: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         """Get files in folder"""
-        # Corrected Endpoint: /folders/content/{uuid}/files
         url = f"{self.drive_api_url}/folders/content/{folder_uuid}/files"
         params = {'offset': offset, 'limit': limit, 'sort': 'plainName', 'direction': 'ASC'}
         return self.get(url, params)
 
     def create_folder(self, plain_name: str, parent_folder_uuid: str) -> Dict[str, Any]:
         """Create new folder"""
-        # Corrected Endpoint: /folders
         url = f"{self.drive_api_url}/folders"
         data = {'plainName': plain_name, 'parentFolderUuid': parent_folder_uuid}
         return self.post(url, data)
@@ -129,51 +133,29 @@ class ApiClient:
         """Creates the file metadata entry in the Drive, matching the SDK blueprint."""
         url = f"{self.drive_api_url}/files"
         return self.post(url, data=payload)
-        
-    def create_file_entry_v1(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create file entry in drive"""
-        
-        url = f"{self.drive_api_url}/files"
-        
-        payload = {
-            'name': file_data.get('name'),
-            'bucket': file_data.get('bucket'),
-            'fileId': file_data.get('fileId'),
-            'encryptVersion': file_data.get('encryptVersion'),
-            'folderUuid': file_data.get('folderId'), 
-            'size': file_data.get('size'),
-            'plainName': file_data.get('plainName'),
-            'type': file_data.get('type'),
-        }
-        return self.post(url, payload)
 
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
         """Get file metadata"""
-        
         url = f"{self.drive_api_url}/files/{file_uuid}/meta"
         return self.get(url)
 
     def get_folder_metadata(self, folder_uuid: str) -> Dict[str, Any]:
         """Get folder metadata"""
-        
         url = f"{self.drive_api_url}/folders/{folder_uuid}/meta"
         return self.get(url)
 
     def delete_file(self, file_uuid: str) -> Dict[str, Any]:
         """Delete a file"""
-        
         url = f"{self.drive_api_url}/files/{file_uuid}"
         return self.delete(url)
 
     def delete_folder(self, folder_uuid: str) -> Dict[str, Any]:
         """Delete a folder"""
-        
         url = f"{self.drive_api_url}/folders/{folder_uuid}"
         return self.delete(url)
 
     def get_storage_usage(self) -> Dict[str, Any]:
         """Get storage usage information"""
-        # Corrected Endpoint: /users/usage (v2 endpoint)
         url = f"{self.drive_api_url}/users/usage"
         return self.get(url)
     
@@ -187,21 +169,6 @@ class ApiClient:
         response = requests.get(download_url, timeout=300)
         response.raise_for_status()
         return response.content
-
-    # Note: The network API methods below interact with a different service ('gateway.internxt.com')
-    # and their endpoints MIGHT be correct as they are. Will check later...
-    def get_upload_urls(self, bucket_id: str, file_size: int) -> Dict[str, Any]:
-        """Get upload URLs for file"""
-        # This endpoint uses NETWORK_URL, not DRIVE_API_URL
-        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start"
-        data = {'uploads': [{'index': 0, 'size': file_size}]}
-        return self.post(url, data)
-
-    def get_download_urls(self, bucket_id: str, file_id: str) -> Dict[str, Any]:
-        """Get download URLs for file"""
-        # This endpoint uses NETWORK_URL and a different header version
-        url = f"{self.network_url}/buckets/{bucket_id}/files/{file_id}/info"
-        return self.get(url, headers={'x-api-version': '2'})
 
 # Global instance
 api_client = ApiClient()
