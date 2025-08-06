@@ -152,27 +152,65 @@ class InternxtDAVResource(DAVNonCollection):
         """Support last modified date"""
         return True
     
-    def get_content(self) -> Iterator[bytes]:
-        """Stream file content - Return dummy content for testing"""
-        file_name = self.file_metadata.get('plainName', 'unknown')
-        file_type = self.file_metadata.get('type', 'txt')
-        size = self.file_metadata.get('size', 0)
-        
-        content = f"""DEBUG: Internxt WebDAV File
-File: {file_name}.{file_type}
-UUID: {self.file_metadata.get('uuid', 'unknown')}
-Size: {size} bytes
-Path: {self.path}
-Created: {self.file_metadata.get('createdAt', 'unknown')}
-Content-Type: {self.get_content_type()}
-
-This is a test file from your Internxt Drive accessed via WebDAV.
-The file content shows that the WebDAV server is working correctly.
-
-To implement actual file downloading, uncomment the download code
-in the get_content() method of InternxtDAVResource.
-"""
-        yield content.encode('utf-8')
+    def get_content(self) -> Union[bytes, io.BytesIO]:
+        """Return file content as a seekable file-like object"""
+        try:
+            # Get the file content from Internxt
+            from services.drive import drive_service
+            from services.auth import auth_service
+            
+            credentials = auth_service.get_auth_details()
+            user = credentials['user']
+            mnemonic = user['mnemonic']
+            
+            # Get file metadata
+            file_uuid = self.file_metadata.get('uuid')
+            if not file_uuid:
+                return io.BytesIO(b"Error: No file UUID found")
+                
+            print(f"📥 WEBDAV: Downloading file {file_uuid} for streaming...")
+            
+            # Use the drive service to download
+            api_client = webdav_api._get_isolated_session()
+            network_auth = drive_service._get_network_auth(user)
+            
+            # Get download info
+            metadata = api_client.get_file_metadata(file_uuid)
+            bucket_id = metadata['bucket']
+            network_file_id = metadata['fileId']
+            file_size = int(metadata['size'])
+            
+            # Get download link
+            links_response = api_client.get_download_links(bucket_id, network_file_id, auth=network_auth)
+            download_url = links_response['shards'][0]['url']
+            file_index_hex = links_response['index']
+            
+            # Download encrypted data
+            encrypted_data = api_client.download_chunk(download_url)
+            
+            # Decrypt
+            from services.crypto import crypto_service
+            decrypted_data = crypto_service.decrypt_stream_internxt_protocol(
+                encrypted_data, mnemonic, bucket_id, file_index_hex
+            )
+            
+            # Trim to exact size if needed
+            if len(decrypted_data) > file_size:
+                decrypted_data = decrypted_data[:file_size]
+            
+            print(f"✅ WEBDAV: Downloaded {len(decrypted_data)} bytes, returning as BytesIO")
+            
+            # Return as a seekable BytesIO object
+            return io.BytesIO(decrypted_data)
+            
+        except Exception as e:
+            print(f"❌ WEBDAV: Error downloading file: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Return error message as content
+            error_msg = f"Error downloading file: {str(e)}\n"
+            return io.BytesIO(error_msg.encode('utf-8'))
 
 
 class InternxtDAVCollection(DAVCollection):
@@ -310,7 +348,7 @@ class InternxtDAVCollection(DAVCollection):
                 content = webdav_api.get_folder_content(root_folder_uuid)
                 
             else:
-                # Non-root folder - use existing drive service for now
+                # Non-root folder - use existing drive service
                 print(f"🔍 WEBDAV: Non-root folder: {self.path}")
                 from services.drive import drive_service
                 content = drive_service.list_folder_with_paths(self.path)
@@ -350,7 +388,7 @@ class InternxtDAVCollection(DAVCollection):
 
 
 class InternxtDAVProvider(DAVProvider):
-    """WebDAV Provider for Internxt Drive - FIXED ETag handling"""
+    """WebDAV Provider for Internxt Drive - FIXED with proper file/folder detection"""
     
     def __init__(self):
         super().__init__()
@@ -367,27 +405,46 @@ class InternxtDAVProvider(DAVProvider):
             raise
     
     def get_resource_inst(self, path: str, environ: dict) -> Optional[Union[DAVCollection, DAVNonCollection]]:
-        """Get DAV resource for given path"""
+        """Get DAV resource for given path - FIXED to properly detect files vs folders"""
         try:
             if not path.startswith('/'):
                 path = '/' + path
             
             print(f"🔍 WEBDAV: get_resource_inst() for path: {path}")
             
-            # Always return a collection for simplicity
-            return InternxtDAVCollection(path, environ)
+            # Root is always a collection
+            if path == '/' or path == '':
+                return InternxtDAVCollection(path, environ)
+            
+            # For other paths, we need to check if it's a file or folder
+            # Parse the path to get parent and name
+            path_parts = path.strip('/').split('/')
+            parent_path = '/' + '/'.join(path_parts[:-1]) if len(path_parts) > 1 else '/'
+            item_name = path_parts[-1]
+            
+            # Get parent collection
+            parent_collection = InternxtDAVCollection(parent_path, environ)
+            
+            # Try to get the specific member
+            member = parent_collection.get_member(item_name)
+            if member:
+                return member
+            
+            # If not found, return None (404)
+            print(f"❌ WEBDAV: Resource not found: {path}")
+            return None
                 
         except Exception as e:
             print(f"❌ WEBDAV: Error in get_resource_inst({path}): {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def exists(self, path: str, environ: dict) -> bool:
         """Check if path exists"""
         try:
-            if path == '/':
-                return True
-            # For now, assume all paths exist for testing
-            return True
+            resource = self.get_resource_inst(path, environ)
+            return resource is not None
         except Exception as e:
             print(f"❌ WEBDAV: Error in exists({path}): {e}")
             return False
