@@ -69,7 +69,7 @@ def format_date(date_string: str) -> str:
 @click.group()
 @click.version_option(version='1.0.0')
 def cli():
-    """Internxt Python CLI with Path Support and Delete Operations"""
+    """Internxt Python CLI"""
     pass
 
 
@@ -654,7 +654,7 @@ def test():
     # Test 1: Config service
     try:
         assert config_service.get('DRIVE_NEW_API_URL') == 'https://api.internxt.com/drive'
-        click.echo("✅ Config service - exact TypeScript match")
+        click.echo("✅ Config service")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Config service failed: {e}")
@@ -665,7 +665,7 @@ def test():
         encrypted = crypto_service.encrypt_text(test_text)
         decrypted = crypto_service.decrypt_text(encrypted)
         assert decrypted == test_text
-        click.echo("✅ Crypto service - exact TypeScript CryptoJS compatibility")
+        click.echo("✅ Crypto service")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Crypto service failed: {e}")
@@ -675,7 +675,7 @@ def test():
         login_url = f"{api_client.drive_api_url}/auth/login"
         expected_login = "https://api.internxt.com/drive/auth/login"
         assert login_url == expected_login
-        click.echo("✅ API endpoints - exact match to working API")
+        click.echo("✅ API endpoints")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ API endpoint test failed: {e}")
@@ -685,7 +685,7 @@ def test():
         assert hasattr(auth_service, 'do_login')
         assert hasattr(auth_service, 'is_2fa_needed')
         assert hasattr(auth_service, 'get_auth_details')
-        click.echo("✅ Auth service - exact TypeScript AuthService structure")
+        click.echo("✅ Auth service")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Auth service structure test failed: {e}")
@@ -695,7 +695,7 @@ def test():
         valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
         is_valid = crypto_service.validate_mnemonic(valid_mnemonic)
         assert is_valid == True
-        click.echo("✅ Mnemonic validation - exact TypeScript ValidationService match")
+        click.echo("✅ Mnemonic validation")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Mnemonic validation test failed: {e}")
@@ -705,7 +705,7 @@ def test():
         home_dir = Path.home()
         expected_config_dir = home_dir / '.internxt-cli'
         assert config_service.internxt_cli_data_dir == expected_config_dir
-        click.echo("✅ File paths - exact TypeScript ConfigService match")
+        click.echo("✅ File paths")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ File path test failed: {e}")

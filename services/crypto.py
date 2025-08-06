@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/crypto.py
-Cryptographic operations for Internxt CLI - EXACT match to TypeScript inxt-js implementation
-FIXED: Now implements the EXACT protocol from inxt-js crypto.ts
+Cryptographic operations for Internxt CLI
 """
 import os
 import hashlib
@@ -17,14 +16,14 @@ from mnemonic import Mnemonic
 
 from config.config import config_service
 
-# Exact constants from inxt-js crypto.ts
+# constants from inxt-js crypto.ts
 BUCKET_META_MAGIC = bytes([
     66, 150, 71, 16, 50, 114, 88, 160, 163, 35, 154, 65, 162, 213, 226, 215, 
     70, 138, 57, 61, 52, 19, 210, 170, 38, 164, 162, 200, 86, 201, 2, 81
 ])
 
 class CryptoService:
-    """Handles all cryptographic operations - EXACT match to inxt-js implementation"""
+    """Handles all cryptographic operations"""
 
     def __init__(self):
         self.backend = default_backend()
@@ -32,7 +31,7 @@ class CryptoService:
 
     def generate_file_bucket_key(self, mnemonic: str, bucket_id: str) -> bytes:
         """
-        EXACT implementation of GenerateFileBucketKey from inxt-js crypto.ts
+        matches GenerateFileBucketKey from inxt-js crypto.ts
         """
         # Convert mnemonic to seed using BIP39 (exact match to mnemonicToSeed)
         seed = self.mnemonic_gen.to_seed(mnemonic)
@@ -45,7 +44,7 @@ class CryptoService:
 
     def get_file_deterministic_key(self, key: bytes, data: bytes) -> bytes:
         """
-        EXACT implementation of GetFileDeterministicKey from inxt-js crypto.ts
+        matches GetFileDeterministicKey from inxt-js crypto.ts
         """
         hash_obj = hashlib.sha512()
         hash_obj.update(key)
@@ -54,14 +53,14 @@ class CryptoService:
 
     def generate_file_key(self, mnemonic: str, bucket_id: str, index: bytes) -> bytes:
         """
-        EXACT implementation of GenerateFileKey from inxt-js crypto.ts
+        matches GenerateFileKey from inxt-js crypto.ts
         """
         bucket_key = self.generate_file_bucket_key(mnemonic, bucket_id)
         return self.get_file_deterministic_key(bucket_key[:32], index)[:32]
 
     def encrypt_stream_internxt_protocol(self, data: bytes, mnemonic: str, bucket_id: str) -> Tuple[bytes, str]:
         """
-        Encrypts file data using Internxt's EXACT protocol from uploadV2.ts
+        Encrypts file data matching uploadV2.ts
         Returns (encrypted_data, file_index_hex) - matches Network SDK format
         """
         # Generate 32-byte random index (matches randomBytes(32) from uploadV2.ts)
@@ -82,7 +81,7 @@ class CryptoService:
 
     def decrypt_stream_internxt_protocol(self, encrypted_data: bytes, mnemonic: str, bucket_id: str, file_index_hex: str) -> bytes:
         """
-        Decrypts file data using Internxt's EXACT protocol
+        Decrypts file data
         Matches the decryption process from download functionality
         """
         index = bytes.fromhex(file_index_hex)
@@ -102,7 +101,7 @@ class CryptoService:
 
     def encrypt_filename(self, mnemonic: str, bucket_id: str, filename: str) -> str:
         """
-        EXACT implementation of EncryptFilename from inxt-js crypto.ts
+        matches EncryptFilename from inxt-js crypto.ts
         """
         bucket_key = self.generate_bucket_key(mnemonic, bucket_id)
         
@@ -116,7 +115,7 @@ class CryptoService:
 
     def decrypt_filename(self, mnemonic: str, bucket_id: str, encrypted_name: str) -> str:
         """
-        EXACT implementation of DecryptFileName from inxt-js crypto.ts
+        matches DecryptFileName from inxt-js crypto.ts
         """
         bucket_key = self.generate_bucket_key(mnemonic, bucket_id)
         
@@ -131,11 +130,11 @@ class CryptoService:
 
     def generate_bucket_key(self, mnemonic: str, bucket_id: str) -> str:
         """
-        EXACT implementation of GenerateBucketKey from inxt-js crypto.ts
+        matches GenerateBucketKey from inxt-js crypto.ts
         """
         seed = self.mnemonic_gen.to_seed(mnemonic).hex()
         
-        # EXACT implementation of GetDeterministicKey
+        # matches GetDeterministicKey
         sha512_input = seed + bucket_id
         deterministic_key = hashlib.sha512(bytes.fromhex(sha512_input)).hexdigest()
         
@@ -159,7 +158,7 @@ class CryptoService:
 
     def encrypt_meta(self, file_meta: str, key: bytes, iv: bytes) -> str:
         """
-        EXACT implementation of EncryptMeta from inxt-js crypto.ts using AES-256-GCM
+        matches EncryptMeta from inxt-js crypto.ts using AES-256-GCM
         """
         cipher = Cipher(algorithms.AES(key), modes.GCM(iv[:16]), backend=self.backend)
         encryptor = cipher.encryptor()
@@ -173,12 +172,12 @@ class CryptoService:
 
     def decrypt_meta(self, buffer_base64: str, decrypt_key: str) -> str:
         """
-        EXACT implementation of decryptMeta from inxt-js crypto.ts
+        matches decryptMeta from inxt-js crypto.ts
         """
         try:
             data = base64.b64decode(buffer_base64)
             
-            # Extract components (matches the TypeScript implementation)
+            # Extract components
             GCM_DIGEST_SIZE = 16
             SHA256_DIGEST_SIZE = 32
             

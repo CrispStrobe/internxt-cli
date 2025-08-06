@@ -171,7 +171,7 @@ class ApiClient:
         return self.delete(url)
 
     def trash_items(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Add items to trash - matches TypeScript TrashService.trashItems()"""
+        """Add items to trash - matches TrashService.trashItems()"""
         url = f"{self.drive_api_url}/trash"
         return self.post(url, data=payload)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/auth.py
-Authentication service for Internxt CLI - Corrected and aligned with official protocols.
+Authentication service for Internxt CLI
 """
 import base64
 from datetime import datetime, timezone
@@ -90,7 +90,6 @@ class AuthService:
             'lastTokenRefreshAt': datetime.now(timezone.utc).isoformat(),
         }
 
-    # ... (The rest of the AuthService remains the same as your correct version) ...
     def login(self, email: str, password: str, tfa_code: Optional[str] = None) -> Dict[str, Any]:
         credentials = self.do_login(email, password, tfa_code)
         self.config.save_user_credentials(credentials)

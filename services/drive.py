@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/drive.py
-Extended Drive operations - Path resolution + Trash operations matching TypeScript services
+with path resolution
 """
 
 import os
@@ -233,7 +233,7 @@ class DriveService:
         print(f"📍 Found {len(results)} matching files")
         return results
 
-    # ========== TRASH OPERATIONS (matching TypeScript TrashService) ==========
+    # ========== TRASH OPERATIONS ==========
 
     def trash_file(self, file_uuid: str) -> Dict[str, Any]:
         """Move file to trash - matches TrashService.trashItems()"""
@@ -399,7 +399,7 @@ class DriveService:
         if file_size > self.TWENTY_GIGABYTES:
             raise ValueError("File is too large (must be less than 20 GB)")
         
-        print(f"📤 Uploading '{file_path.name}' using EXACT TypeScript protocol...")
+        print(f"📤 Uploading '{file_path.name}' ...")
         
         with open(file_path, 'rb') as f:
             plaintext = f.read()
@@ -455,7 +455,7 @@ class DriveService:
         mnemonic = user['mnemonic']
         network_auth = self._get_network_auth(user)
         
-        print(f"📥 Downloading file UUID: {file_uuid} using EXACT TypeScript protocol...")
+        print(f"📥 Downloading file UUID: {file_uuid} ...")
 
         with tqdm(total=5, desc="Downloading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
             pbar.set_description("📋 Fetching file metadata")
