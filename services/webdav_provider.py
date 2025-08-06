@@ -22,6 +22,7 @@ except ImportError:
 
 # Configuration
 MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100MB - files larger than this use disk
+VERBOSE_LOGGING = False  # Set to True for detailed logging
 
 
 class StreamingFileUpload:
@@ -115,11 +116,13 @@ class WebDAVAPIClient:
         self._credentials = None
         self._api_client = None
         self._thread_local = threading.local()
+        self._deleted_items = set()  # Track recently deleted items
         
     def _get_isolated_session(self):
         """Get a thread-local API session"""
         if not hasattr(self._thread_local, 'api_client'):
-            print("🔍 WEBDAV: Creating fresh API session for WebDAV thread")
+            if VERBOSE_LOGGING:
+                print("🔍 WEBDAV: Creating fresh API session for WebDAV thread")
             
             from services.auth import auth_service
             from utils.api import ApiClient
@@ -133,14 +136,16 @@ class WebDAVAPIClient:
             )
             
             self._thread_local.api_client = fresh_api_client
-            print("✅ WEBDAV: Fresh API session created")
+            if VERBOSE_LOGGING:
+                print("✅ WEBDAV: Fresh API session created")
             
         return self._thread_local.api_client
     
     def get_folder_content(self, folder_uuid: str) -> Dict[str, Any]:
         """Get folder content using isolated API session"""
         try:
-            print(f"🔍 WEBDAV: Getting content for folder {folder_uuid}")
+            if VERBOSE_LOGGING:
+                print(f"🔍 WEBDAV: Getting content for folder {folder_uuid}")
             api_client = self._get_isolated_session()
             
             folders_response = api_client.get_folder_folders(folder_uuid, 0, 50)
@@ -149,11 +154,13 @@ class WebDAVAPIClient:
             files_response = api_client.get_folder_files(folder_uuid, 0, 50)  
             files = files_response.get('result', files_response.get('files', []))
             
-            print(f"✅ WEBDAV: Got {len(folders)} folders and {len(files)} files")
+            if VERBOSE_LOGGING:
+                print(f"✅ WEBDAV: Got {len(folders)} folders and {len(files)} files")
             return {'folders': folders, 'files': files}
             
         except Exception as e:
-            print(f"❌ WEBDAV: Error getting folder content: {e}")
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error getting folder content: {e}")
             return {'folders': [], 'files': []}
     
     def get_credentials(self) -> Dict[str, Any]:
@@ -162,6 +169,17 @@ class WebDAVAPIClient:
             from services.auth import auth_service
             self._credentials = auth_service.get_auth_details()
         return self._credentials
+    
+    def mark_deleted(self, path: str):
+        """Mark a path as recently deleted"""
+        self._deleted_items.add(path)
+        # Clean up old entries after some time
+        if len(self._deleted_items) > 100:
+            self._deleted_items.clear()
+    
+    def is_recently_deleted(self, path: str) -> bool:
+        """Check if a path was recently deleted"""
+        return path in self._deleted_items
 
 
 # Global instance for WebDAV
@@ -417,6 +435,9 @@ class InternxtDAVResource(DAVNonCollection):
             # Use the actual trash_file method from drive_service
             result = drive_service.trash_file(file_uuid)
             
+            # Mark as deleted to avoid unnecessary lookups
+            webdav_api.mark_deleted(self.path)
+            
             print(f"✅ WEBDAV: Deleted file {self.path}")
             
         except Exception as e:
@@ -458,6 +479,9 @@ class InternxtDAVResource(DAVNonCollection):
             if current_full_name != new_name:
                 # Need to rename
                 result = drive_service.rename_file(file_uuid, new_name)
+            
+            # Mark old path as deleted
+            webdav_api.mark_deleted(self.path)
             
             print(f"✅ WEBDAV: Moved file to {dest_path}")
             
@@ -509,16 +533,19 @@ class InternxtDAVCollection(DAVCollection):
         try:
             content = self._get_content()
             names = content.get('names', [])
-            print(f"✅ WEBDAV: Returning {len(names)} member names: {names}")
+            if VERBOSE_LOGGING:
+                print(f"✅ WEBDAV: Returning {len(names)} member names: {names}")
             return names
         except Exception as e:
-            print(f"❌ WEBDAV: Error getting member names for {self.path}: {e}")
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error getting member names for {self.path}: {e}")
             return []
     
     def get_member(self, name: str) -> Optional[Union[DAVCollection, DAVNonCollection]]:
         """Get a specific member (file or folder) by name"""
         try:
-            print(f"🔍 WEBDAV: get_member({name}) for path: {self.path}")
+            if VERBOSE_LOGGING:
+                print(f"🔍 WEBDAV: get_member({name}) for path: {self.path}")
             content = self._get_content()
             
             # Check if it's a folder
@@ -526,7 +553,8 @@ class InternxtDAVCollection(DAVCollection):
                 folder_name = folder.get('plainName', folder.get('name', ''))
                 if folder_name == name:
                     child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
-                    print(f"✅ WEBDAV: Found folder: {name}")
+                    if VERBOSE_LOGGING:
+                        print(f"✅ WEBDAV: Found folder: {name}")
                     return InternxtDAVCollection(child_path, self.environ, folder)
             
             # Check if it's a file
@@ -537,16 +565,21 @@ class InternxtDAVCollection(DAVCollection):
                 
                 if display_name == name:
                     child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
-                    print(f"✅ WEBDAV: Found file: {name}")
+                    if VERBOSE_LOGGING:
+                        print(f"✅ WEBDAV: Found file: {name}")
                     return InternxtDAVResource(child_path, self.environ, file)
             
-            print(f"❌ WEBDAV: Member '{name}' not found in {self.path}")
+            # Only log if not recently deleted
+            child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
+            if not webdav_api.is_recently_deleted(child_path) and VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Member '{name}' not found in {self.path}")
             return None
             
         except Exception as e:
-            print(f"❌ WEBDAV: Error getting member {name}: {e}")
-            import traceback
-            traceback.print_exc()
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error getting member {name}: {e}")
+                import traceback
+                traceback.print_exc()
             return None
     
     def create_empty_resource(self, name: str):
@@ -614,6 +647,9 @@ class InternxtDAVCollection(DAVCollection):
             # Use the actual trash_folder method from drive_service
             result = drive_service.trash_folder(folder_uuid)
             
+            # Mark as deleted to avoid unnecessary lookups
+            webdav_api.mark_deleted(self.path)
+            
             print(f"✅ WEBDAV: Deleted folder {self.path}")
             
         except Exception as e:
@@ -653,6 +689,9 @@ class InternxtDAVCollection(DAVCollection):
             if current_name != new_name:
                 # Need to rename
                 result = drive_service.rename_folder(folder_uuid, new_name)
+            
+            # Mark old path as deleted
+            webdav_api.mark_deleted(self.path)
             
             print(f"✅ WEBDAV: Moved folder to {dest_path}")
             
@@ -731,7 +770,8 @@ class InternxtDAVCollection(DAVCollection):
             return self._content_cache
         
         try:
-            print(f"🔍 WEBDAV: Fetching fresh content for: {self.path}")
+            if VERBOSE_LOGGING:
+                print(f"🔍 WEBDAV: Fetching fresh content for: {self.path}")
             
             if self.path == '/' or self.path == '':
                 # Root folder
@@ -773,13 +813,15 @@ class InternxtDAVCollection(DAVCollection):
             self._content_cache = result
             self._content_cached_time = current_time
             
-            print(f"✅ WEBDAV: Cached content - {len(names)} total items")
+            if VERBOSE_LOGGING:
+                print(f"✅ WEBDAV: Cached content - {len(names)} total items")
             return result
             
         except Exception as e:
-            print(f"❌ WEBDAV: Error getting content for {self.path}: {e}")
-            import traceback
-            traceback.print_exc()
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error getting content for {self.path}: {e}")
+                import traceback
+                traceback.print_exc()
             return {'folders': [], 'files': [], 'names': []}
 
 
@@ -806,11 +848,18 @@ class InternxtDAVProvider(DAVProvider):
             if not path.startswith('/'):
                 path = '/' + path
             
-            print(f"🔍 WEBDAV: get_resource_inst() for path: {path}")
+            if VERBOSE_LOGGING:
+                print(f"🔍 WEBDAV: get_resource_inst() for path: {path}")
             
             # Root is always a collection
             if path == '/' or path == '':
                 return InternxtDAVCollection(path, environ)
+            
+            # Skip if recently deleted
+            if webdav_api.is_recently_deleted(path):
+                if VERBOSE_LOGGING:
+                    print(f"ℹ️  WEBDAV: Skipping recently deleted path: {path}")
+                return None
             
             # For other paths, check if it's a file or folder
             path_parts = path.strip('/').split('/')
@@ -826,13 +875,15 @@ class InternxtDAVProvider(DAVProvider):
                 return member
             
             # If not found, return None (404)
-            print(f"❌ WEBDAV: Resource not found: {path}")
+            if not webdav_api.is_recently_deleted(path) and VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Resource not found: {path}")
             return None
                 
         except Exception as e:
-            print(f"❌ WEBDAV: Error in get_resource_inst({path}): {e}")
-            import traceback
-            traceback.print_exc()
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error in get_resource_inst({path}): {e}")
+                import traceback
+                traceback.print_exc()
             return None
     
     def exists(self, path: str, environ: dict) -> bool:
@@ -841,5 +892,6 @@ class InternxtDAVProvider(DAVProvider):
             resource = self.get_resource_inst(path, environ)
             return resource is not None
         except Exception as e:
-            print(f"❌ WEBDAV: Error in exists({path}): {e}")
+            if VERBOSE_LOGGING:
+                print(f"❌ WEBDAV: Error in exists({path}): {e}")
             return False
