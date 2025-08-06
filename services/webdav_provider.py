@@ -86,6 +86,7 @@ class InternxtDAVResource(DAVNonCollection):
     def __init__(self, path: str, environ: dict, file_metadata: dict):
         super().__init__(path, environ)
         self.file_metadata = file_metadata
+        self._temp_file_path = None
         
     def get_content_length(self) -> int:
         """Return file size"""
@@ -165,8 +166,9 @@ class InternxtDAVResource(DAVNonCollection):
             
             # Get file metadata
             file_uuid = self.file_metadata.get('uuid')
-            if not file_uuid:
-                return io.BytesIO(b"Error: No file UUID found")
+            if not file_uuid or file_uuid.startswith('pending-'):
+                # This is a newly created file that hasn't been uploaded yet
+                return io.BytesIO(b"")
                 
             print(f"📥 WEBDAV: Downloading file {file_uuid} for streaming...")
             
@@ -211,6 +213,96 @@ class InternxtDAVResource(DAVNonCollection):
             # Return error message as content
             error_msg = f"Error downloading file: {str(e)}\n"
             return io.BytesIO(error_msg.encode('utf-8'))
+    
+    def begin_write(self, content_type=None):
+        """Called when starting to write content to the file"""
+        print(f"🔍 WEBDAV: begin_write() for {self.path}")
+        
+        # Create a temporary file to store the upload
+        import tempfile
+        fd, self._temp_file_path = tempfile.mkstemp()
+        os.close(fd)  # Close the file descriptor, we'll use the path
+        
+        # Return a file handle that WsgiDAV can write to
+        return open(self._temp_file_path, 'wb')
+    
+    def end_write(self, with_errors: bool):
+        """Called when writing is complete"""
+        print(f"🔍 WEBDAV: end_write(with_errors={with_errors}) for {self.path}")
+        
+        if with_errors or not self._temp_file_path:
+            print("❌ WEBDAV: Upload had errors or no temp file, aborting")
+            self._cleanup_temp_file()
+            return
+        
+        try:
+            # Get file size
+            file_size = os.path.getsize(self._temp_file_path)
+            print(f"📤 WEBDAV: Uploading {file_size} bytes to Internxt...")
+            
+            from services.drive import drive_service
+            from services.auth import auth_service
+            
+            # Get parent folder UUID
+            path_parts = self.path.strip('/').split('/')
+            if len(path_parts) == 1:
+                # File in root
+                credentials = auth_service.get_auth_details()
+                parent_uuid = credentials['user'].get('rootFolderId', '')
+            else:
+                # File in subfolder
+                parent_path = '/' + '/'.join(path_parts[:-1])
+                resolved = drive_service.resolve_path(parent_path)
+                parent_uuid = resolved['uuid']
+            
+            # Get file name
+            file_name = path_parts[-1]
+            
+            # Parse name and extension
+            if '.' in file_name:
+                plain_name = file_name.rsplit('.', 1)[0]
+                file_type = file_name.rsplit('.', 1)[1]
+            else:
+                plain_name = file_name
+                file_type = ''
+            
+            # Check if we're updating an existing file
+            if hasattr(self, 'file_metadata') and self.file_metadata.get('uuid') and not self.file_metadata.get('uuid', '').startswith('pending-'):
+                # Update existing file
+                file_uuid = self.file_metadata['uuid']
+                print(f"📝 WEBDAV: Updating existing file {file_uuid}")
+                result = drive_service.update_file(file_uuid, self._temp_file_path)
+            else:
+                # Create new file
+                print(f"📝 WEBDAV: Creating new file {plain_name}.{file_type}")
+                result = drive_service.upload_file_to_folder(self._temp_file_path, parent_uuid, plain_name, file_type)
+            
+            print(f"✅ WEBDAV: Upload successful!")
+            
+            # Update metadata
+            if isinstance(result, dict):
+                self.file_metadata.update(result)
+            
+            # Clear parent folder cache
+            if hasattr(self, 'parent') and hasattr(self.parent, '_content_cache'):
+                self.parent._content_cache = None
+                
+        except Exception as e:
+            print(f"❌ WEBDAV: Upload failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise DAVError(HTTP_FORBIDDEN, f"Upload failed: {e}")
+        finally:
+            self._cleanup_temp_file()
+    
+    def _cleanup_temp_file(self):
+        """Clean up temporary file"""
+        if self._temp_file_path and os.path.exists(self._temp_file_path):
+            try:
+                os.unlink(self._temp_file_path)
+                self._temp_file_path = None
+            except:
+                pass
 
 
 class InternxtDAVCollection(DAVCollection):
@@ -385,6 +477,54 @@ class InternxtDAVCollection(DAVCollection):
             import traceback
             traceback.print_exc()
             return {'folders': [], 'files': [], 'names': []}
+        
+    def create_empty_resource(self, name: str):
+        """Create a new empty file resource"""
+        print(f"🔍 WEBDAV: create_empty_resource({name}) in {self.path}")
+        
+        # Create a placeholder file resource that will receive content later
+        file_metadata = {
+            'plainName': name.rsplit('.', 1)[0] if '.' in name else name,
+            'type': name.rsplit('.', 1)[1] if '.' in name else '',
+            'size': 0,
+            'uuid': f'pending-{name}',  # Temporary UUID
+            'isUploading': True
+        }
+        
+        child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
+        return InternxtDAVResource(child_path, self.environ, file_metadata)
+
+    def create_collection(self, name: str):
+        """Create a new folder"""
+        print(f"🔍 WEBDAV: create_collection({name}) in {self.path}")
+        
+        try:
+            from services.drive import drive_service
+            from services.auth import auth_service
+            
+            # Get parent folder UUID
+            if self.path == '/' or self.path == '':
+                credentials = auth_service.get_auth_details()
+                parent_uuid = credentials['user'].get('rootFolderId', '')
+            else:
+                # Resolve parent path to get UUID
+                resolved = drive_service.resolve_path(self.path)
+                parent_uuid = resolved['uuid']
+            
+            # Create folder
+            new_folder = drive_service.create_folder(name, parent_uuid)
+            
+            # Clear cache so the new folder appears
+            self._content_cache = None
+            
+            print(f"✅ WEBDAV: Created folder {name} with UUID {new_folder['uuid']}")
+            
+            child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
+            return InternxtDAVCollection(child_path, self.environ, new_folder)
+            
+        except Exception as e:
+            print(f"❌ WEBDAV: Error creating folder: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not create folder: {e}")
 
 
 class InternxtDAVProvider(DAVProvider):
@@ -392,7 +532,7 @@ class InternxtDAVProvider(DAVProvider):
     
     def __init__(self):
         super().__init__()
-        self.readonly = False
+        self.readonly = False # Enable write support
         
         print("🔍 WEBDAV: Initializing InternxtDAVProvider (FIXED ETAG VERSION)...")
         
