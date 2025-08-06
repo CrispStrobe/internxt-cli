@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/webdav_server.py
-WebDAV Server service for mounting Internxt Drive as local filesystem
-FINAL FIXED VERSION - Addresses SSL and HTTP hanging issues
 """
 
 import os
@@ -12,19 +10,32 @@ import signal
 import threading
 import socket
 import tempfile
+import atexit
 from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 
 try:
     from wsgidav.wsgidav_app import WsgiDAVApp
     from wsgidav.fs_dav_provider import FilesystemProvider
-    from cheroot import wsgi
-    from cheroot.ssl.builtin import BuiltinSSLAdapter
-    import ssl
 except ImportError:
     print("❌ Missing WebDAV dependencies. Install with:")
-    print("   pip install WsgiDAV cheroot")
+    print("   pip install WsgiDAV")
     sys.exit(1)
+
+# Try different WSGI servers
+WSGI_SERVER = None
+try:
+    from waitress import serve
+    WSGI_SERVER = 'waitress'
+except ImportError:
+    try:
+        from cheroot import wsgi
+        WSGI_SERVER = 'cheroot'
+    except ImportError:
+        print("❌ No suitable WSGI server found. Install one of:")
+        print("   pip install waitress")
+        print("   pip install cheroot")
+        sys.exit(1)
 
 from config.config import config_service
 from services.auth import auth_service
@@ -32,26 +43,28 @@ from services.webdav_provider import InternxtDAVProvider
 
 
 class WebDAVServer:
-    """WebDAV Server for Internxt Drive - FINAL FIXED VERSION"""
+    """WebDAV Server for Internxt Drive"""
     
     def __init__(self):
         self.server = None
         self.server_thread = None
         self.is_running = False
+        self.is_stopping = False
         self.config = self._load_config()
-        self.ssl_cert_file = None
-        self.ssl_key_file = None
+        self.app = None
+        
+        # Register cleanup function
+        atexit.register(self._cleanup_on_exit)
         
     def _load_config(self) -> Dict[str, Any]:
-        """Load WebDAV server configuration - Force HTTP by default due to SSL issues"""
+        """Load WebDAV server configuration"""
         webdav_config = config_service.read_webdav_config()
         
         return {
             'host': webdav_config.get('host', 'localhost'),
-            'port': int(webdav_config.get('port', 8080)),  # Use 8080 as default
-            'use_ssl': False,  # Force HTTP for now - SSL has compatibility issues
+            'port': int(webdav_config.get('port', 8080)),
             'timeout_minutes': int(webdav_config.get('timeoutMinutes', 30)),
-            'verbose': int(webdav_config.get('verbose', 1)),  # Enable some logging by default
+            'verbose': int(webdav_config.get('verbose', 1)),
         }
     
     def _check_port_available(self, port: int) -> bool:
@@ -67,61 +80,23 @@ class WebDAVServer:
     def _find_available_port(self, start_port: int) -> int:
         """Find next available port starting from given port"""
         port = start_port
-        while port < start_port + 100:  # Try up to 100 ports
+        while port < start_port + 100:
             if self._check_port_available(port):
                 return port
             port += 1
         raise RuntimeError(f"No available ports found starting from {start_port}")
     
-    def _create_ssl_certificates(self) -> Optional[Tuple[str, str]]:
-        """Create SSL certificates and return file paths (FIXED VERSION)"""
-        if not self.config['use_ssl']:
-            return None
-            
-        try:
-            print("🔐 Generating SSL certificates...")
-            
-            # Get SSL certificates from network utils
-            from services.network_utils import NetworkUtils
-            ssl_certs = NetworkUtils.get_webdav_ssl_certs()
-            
-            # Create persistent temporary files for SSL certificates (FIXED)
-            cert_file = tempfile.NamedTemporaryFile(mode='w', suffix='.crt', prefix='webdav_cert_', delete=False)
-            cert_content = ssl_certs['cert'].decode() if isinstance(ssl_certs['cert'], bytes) else ssl_certs['cert']
-            cert_file.write(cert_content)
-            cert_path = cert_file.name
-            cert_file.close()  # Close the file handle
-            
-            key_file = tempfile.NamedTemporaryFile(mode='w', suffix='.key', prefix='webdav_key_', delete=False)
-            key_content = ssl_certs['key'].decode() if isinstance(ssl_certs['key'], bytes) else ssl_certs['key']
-            key_file.write(key_content)
-            key_path = key_file.name
-            key_file.close()  # Close the file handle
-            
-            # Store paths for cleanup later
-            self.ssl_cert_file = cert_path
-            self.ssl_key_file = key_path
-            
-            print("✅ SSL certificates created successfully")
-            return (cert_path, key_path)  # Return tuple of paths
-            
-        except Exception as e:
-            print(f"⚠️  Failed to create SSL certificates: {e}")
-            print("   Falling back to HTTP")
-            self.config['use_ssl'] = False
-            return None
-    
     def _create_wsgidav_app(self) -> WsgiDAVApp:
-        """Create WsgiDAV application with simplified, working configuration"""
+        """Create WsgiDAV application"""
         
-        # Minimal WebDAV configuration that works with current WsgiDAV versions
+        # WebDAV configuration optimized for compatibility
         config = {
             'provider_mapping': {
                 '/': InternxtDAVProvider(),
             },
             'simple_dc': {
                 'user_mapping': {
-                    '*': {  # Any domain
+                    '*': {
                         'internxt': {
                             'password': 'internxt-webdav',
                             'description': 'Internxt Drive User',
@@ -132,7 +107,7 @@ class WebDAVServer:
             'http_authenticator': {
                 'domain_controller': 'wsgidav.dc.simple_dc.SimpleDomainController',
                 'accept_basic': True,
-                'accept_digest': False,
+                'accept_digest': True,
                 'default_to_digest': False,
             },
             'verbose': self.config['verbose'],
@@ -142,12 +117,17 @@ class WebDAVServer:
                 'enable': True,
                 'response_trailer': '<p>Internxt WebDAV Server</p>',
             },
+            # Compatibility options
+            'block_size': 8192,
+            'add_header_MS_Author_Via': True,
+            # Don't expose server version
+            'server_header': 'Internxt WebDAV Server',
         }
         
         return WsgiDAVApp(config)
     
     def start(self, port: Optional[int] = None, background: bool = False) -> Dict[str, Any]:
-        """Start WebDAV server with improved error handling"""
+        """Start WebDAV server"""
         if self.is_running:
             return {
                 'success': False,
@@ -178,57 +158,10 @@ class WebDAVServer:
         
         try:
             print(f"🔧 Creating WebDAV application...")
-            
-            # Create WsgiDAV app
-            app = self._create_wsgidav_app()
+            self.app = self._create_wsgidav_app()
             
             print(f"🔧 Setting up server on {self.config['host']}:{self.config['port']}...")
-            
-            # Create server
-            bind_host = str(self.config['host'])
-            bind_port = int(self.config['port'])
-            timeout_seconds = int(self.config['timeout_minutes']) * 60
-            
-            self.server = wsgi.Server(
-                bind_addr=(bind_host, bind_port),
-                wsgi_app=app,
-                timeout=timeout_seconds,
-                server_name="Internxt WebDAV Server",
-                # Add these settings to prevent SSL handshake issues
-                numthreads=10,
-                max=-1,
-            )
-            
-            # Setup SSL if enabled (FIXED VERSION)
-            if self.config['use_ssl']:
-                print(f"🔐 Setting up SSL...")
-                try:
-                    ssl_files = self._create_ssl_certificates()
-                    if ssl_files:
-                        cert_path, key_path = ssl_files
-                        
-                        # Create SSL adapter with explicit settings to avoid handshake issues
-                        self.server.ssl_adapter = BuiltinSSLAdapter(
-                            certificate=cert_path,
-                            private_key=key_path,
-                            certificate_chain=None
-                        )
-                        
-                        # Additional SSL context settings to prevent handshake errors
-                        if hasattr(self.server.ssl_adapter, 'context'):
-                            self.server.ssl_adapter.context.check_hostname = False
-                            self.server.ssl_adapter.context.verify_mode = ssl.CERT_NONE
-                        
-                        print(f"🔐 SSL setup completed using cert: {cert_path}")
-                    else:
-                        print(f"🔧 SSL disabled, using HTTP")
-                        self.config['use_ssl'] = False
-                except Exception as e:
-                    print(f"⚠️  SSL setup failed: {e}, falling back to HTTP")
-                    self.config['use_ssl'] = False
-                    self._cleanup_ssl_files()
-            
-            print(f"🔧 Server created successfully")
+            print(f"🔧 Using WSGI server: {WSGI_SERVER}")
             
             # Start server
             if background:
@@ -238,7 +171,7 @@ class WebDAVServer:
                 )
                 self.server_thread.start()
                 
-                # Wait a moment to ensure server starts
+                # Wait for server to start
                 time.sleep(2)
                 
                 if not self.is_running:
@@ -251,7 +184,7 @@ class WebDAVServer:
                 'message': f'WebDAV server started on {self._get_server_url()}',
                 'url': self._get_server_url(),
                 'port': self.config['port'],
-                'protocol': 'https' if self.config['use_ssl'] else 'http'
+                'protocol': 'http'
             }
             
         except Exception as e:
@@ -265,7 +198,7 @@ class WebDAVServer:
             }
     
     def _run_server_thread(self):
-        """Run server in thread with proper error handling and signal handling"""
+        """Run server in thread"""
         try:
             self.is_running = True
             server_url = self._get_server_url()
@@ -277,8 +210,6 @@ class WebDAVServer:
             print()
             print("🌐 Web interface available at:", server_url)
             print()
-            
-            # Show connection instructions
             print("💡 Connection Instructions:")
             print("   1. Open Finder")
             print("   2. Press Cmd+K")
@@ -286,66 +217,70 @@ class WebDAVServer:
             print("   4. Username: internxt")
             print("   5. Password: internxt-webdav")
             print()
+            
+            if WSGI_SERVER == 'cheroot':
+                print("⚠️  Note: You may see 'NoneType has no len()' errors with macOS Finder")
+                print("   This is a known issue. Try using a WebDAV client like Cyberduck instead.")
+                print()
+            
             print("Press Ctrl+C to stop the server")
             
-            # FIXED: Better signal handling
+            # Signal handling
             def signal_handler(signum, frame):
                 print(f"\n🛑 Received signal {signum}, stopping WebDAV server...")
+                self.is_stopping = True
                 self.is_running = False
-                if self.server:
-                    try:
-                        self.server.stop()
-                    except Exception as e:
-                        print(f"Error stopping server: {e}")
-                import sys
-                sys.exit(0)
+                os._exit(0)
             
-            import signal
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
             
-            # Start the server with better error handling
-            try:
-                print("🔄 Starting server...")
+            # Start the appropriate server
+            print("🔄 Starting server...")
+            
+            if WSGI_SERVER == 'waitress':
+                # Use Waitress (more stable with various clients)
+                serve(
+                    self.app,
+                    host=self.config['host'],
+                    port=self.config['port'],
+                    threads=10,
+                    connection_limit=1000,
+                    cleanup_interval=10,
+                    channel_timeout=120,
+                    ident='Internxt WebDAV Server',
+                )
+            else:
+                # Use Cheroot (original)
+                self.server = wsgi.Server(
+                    bind_addr=(self.config['host'], self.config['port']),
+                    wsgi_app=self.app,
+                    timeout=self.config['timeout_minutes'] * 60,
+                    server_name="Internxt WebDAV Server",
+                    numthreads=10,
+                    max=-1,
+                    shutdown_timeout=5,
+                )
                 self.server.start()
-            except KeyboardInterrupt:
-                print(f"\n🛑 Server interrupted")
-            except Exception as e:
-                print(f"❌ Server error: {e}")
-                raise
             
         except KeyboardInterrupt:
             print("\n🛑 WebDAV server stopped by user")
         except Exception as e:
-            print(f"❌ WebDAV server error: {e}")
-            import traceback
-            traceback.print_exc()
+            if not self.is_stopping:
+                print(f"❌ WebDAV server error: {e}")
+                if "NoneType" not in str(e):
+                    import traceback
+                    traceback.print_exc()
         finally:
             self.is_running = False
-            self._cleanup_ssl_files()
             print("🛑 WebDAV server stopped")
     
-    def _cleanup_ssl_files(self):
-        """Clean up temporary SSL certificate files"""
-        if self.ssl_cert_file:
-            try:
-                os.unlink(self.ssl_cert_file)
-                self.ssl_cert_file = None
-            except OSError:
-                pass
-        
-        if self.ssl_key_file:
-            try:
-                os.unlink(self.ssl_key_file)
-                self.ssl_key_file = None
-            except OSError:
-                pass
-    
     def stop(self) -> Dict[str, Any]:
-        """Stop WebDAV server with improved cleanup"""
+        """Stop WebDAV server"""
         print("🛑 Stopping WebDAV server...")
+        self.is_stopping = True
         
-        if not self.is_running and not self.server:
+        if not self.is_running:
             return {
                 'success': False,
                 'message': 'WebDAV server is not running'
@@ -354,25 +289,21 @@ class WebDAVServer:
         try:
             self.is_running = False
             
-            if self.server:
-                print("🛑 Shutting down HTTP server...")
+            if WSGI_SERVER == 'cheroot' and self.server:
+                print("🛑 Shutting down Cheroot server...")
                 try:
                     self.server.stop()
-                    print("✅ HTTP server stopped")
                 except Exception as e:
-                    print(f"⚠️  Error stopping HTTP server: {e}")
-                finally:
-                    self.server = None
+                    print(f"⚠️  Error stopping server: {e}")
             
             if self.server_thread and self.server_thread.is_alive():
                 print("🛑 Waiting for server thread to finish...")
-                self.server_thread.join(timeout=3)
-                if self.server_thread.is_alive():
-                    print("⚠️  Server thread did not stop cleanly")
+                # For Waitress, we need to forcefully terminate
+                if WSGI_SERVER == 'waitress':
+                    os._exit(0)
                 else:
-                    print("✅ Server thread stopped")
+                    self.server_thread.join(timeout=2)
             
-            self._cleanup_ssl_files()
             print("✅ WebDAV server stopped successfully")
             
             return {
@@ -387,6 +318,12 @@ class WebDAVServer:
                 'message': f'Error stopping WebDAV server: {e}'
             }
     
+    def _cleanup_on_exit(self):
+        """Cleanup function called on exit"""
+        if self.is_running:
+            self.is_stopping = True
+            self.is_running = False
+    
     def status(self) -> Dict[str, Any]:
         """Get server status"""
         if self.is_running:
@@ -394,8 +331,9 @@ class WebDAVServer:
                 'running': True,
                 'url': self._get_server_url(),
                 'port': self.config['port'],
-                'protocol': 'https' if self.config['use_ssl'] else 'http',
-                'host': self.config['host']
+                'protocol': 'http',
+                'host': self.config['host'],
+                'server': WSGI_SERVER
             }
         else:
             return {
@@ -405,55 +343,51 @@ class WebDAVServer:
     
     def _get_server_url(self) -> str:
         """Get server URL"""
-        protocol = 'https' if self.config['use_ssl'] else 'http'
-        return f"{protocol}://{self.config['host']}:{self.config['port']}/"
+        return f"http://{self.config['host']}:{self.config['port']}/"
     
     def get_mount_instructions(self) -> Dict[str, str]:
         """Get platform-specific mount instructions"""
         url = self._get_server_url()
         
+        macos_extra = ""
+        if WSGI_SERVER == 'cheroot':
+            macos_extra = """
+            
+NOTE: If you see connection errors with macOS Finder, try:
+- Using Cyberduck instead: https://cyberduck.io
+- Or install waitress for better compatibility: pip install waitress
+"""
+        
         return {
-            'windows': f"""
-Windows File Explorer:
-1. Open File Explorer
-2. Click on "This PC" 
-3. Click "Map network drive" in the toolbar
-4. Enter: {url}
-5. Username: internxt
-6. Password: internxt-webdav
-
-Windows Command Line:
-net use Z: {url} internxt-webdav /user:internxt
-""",
             'macos': f"""
-macOS Finder (Recommended):
+macOS Finder:
 1. Open Finder
 2. Press Cmd+K (Connect to Server)
 3. Enter: {url}
 4. Click Connect
 5. Username: internxt
-6. Password: internxt-webdav
+6. Password: internxt-webdav{macos_extra}
 
 macOS Command Line:
 mkdir -p ~/InternxtDrive
 mount -t webdav {url} ~/InternxtDrive
-
-Test first with: curl -u internxt:internxt-webdav {url}
+""",
+            'windows': f"""
+Windows File Explorer:
+1. Open File Explorer
+2. Click "This PC" 
+3. Click "Map network drive"
+4. Enter: {url}
+5. Username: internxt
+6. Password: internxt-webdav
 """,
             'linux': f"""
-Linux (davfs2 - Recommended):
-sudo apt install davfs2  # Ubuntu/Debian
+Linux (davfs2):
+sudo apt install davfs2
 sudo mkdir -p /mnt/internxt
 sudo mount -t davfs {url} /mnt/internxt
 Username: internxt
 Password: internxt-webdav
-
-Linux (GNOME Files/Nautilus):
-1. Open Files (Nautilus)
-2. Click "Other Locations" in sidebar
-3. In "Connect to Server" box, enter: {url}
-4. Username: internxt
-5. Password: internxt-webdav
 """
         }
     
@@ -472,15 +406,29 @@ Linux (GNOME Files/Nautilus):
             url = self._get_server_url()
             auth = HTTPBasicAuth('internxt', 'internxt-webdav')
             
-            # Test basic connectivity
-            response = requests.options(url, auth=auth, timeout=10, verify=False)
+            # Test PROPFIND
+            propfind_body = '''<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+    <D:prop>
+        <D:resourcetype/>
+    </D:prop>
+</D:propfind>'''
             
-            if response.status_code in [200, 204]:
+            response = requests.request(
+                'PROPFIND',
+                url,
+                auth=auth,
+                headers={'Depth': '0', 'Content-Type': 'application/xml'},
+                data=propfind_body,
+                timeout=10
+            )
+            
+            if response.status_code == 207 and '<?xml' in response.text:
                 return {
                     'success': True,
-                    'message': 'WebDAV server is responding correctly',
+                    'message': 'WebDAV server is working correctly',
                     'status_code': response.status_code,
-                    'headers': dict(response.headers)
+                    'server': WSGI_SERVER
                 }
             else:
                 return {

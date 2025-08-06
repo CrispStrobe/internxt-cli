@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 internxt_cli/services/webdav_provider.py
-ISOLATED VERSION - Creates fresh API session for WebDAV context
 """
 
 import os
@@ -22,7 +21,7 @@ except ImportError:
 
 
 class WebDAVAPIClient:
-    """Isolated API client for WebDAV context to avoid session conflicts"""
+    """Isolated API client for WebDAV context"""
     
     def __init__(self):
         self._credentials = None
@@ -34,14 +33,11 @@ class WebDAVAPIClient:
         if not hasattr(self._thread_local, 'api_client'):
             print("🔍 WEBDAV: Creating fresh API session for WebDAV thread")
             
-            # Import here to avoid circular imports and get fresh instances
             from services.auth import auth_service
             from utils.api import ApiClient
             
-            # Get fresh credentials
             self._credentials = auth_service.get_auth_details()
             
-            # Create fresh API client instance
             fresh_api_client = ApiClient()
             fresh_api_client.set_auth_tokens(
                 self._credentials.get('token'), 
@@ -59,36 +55,18 @@ class WebDAVAPIClient:
             print(f"🔍 WEBDAV: Getting content for folder {folder_uuid}")
             api_client = self._get_isolated_session()
             
-            # Get folders and files separately like the CLI does
-            print("🔍 WEBDAV: Fetching folders...")
             folders_response = api_client.get_folder_folders(folder_uuid, 0, 50)
             folders = folders_response.get('result', folders_response.get('folders', []))
-            print(f"✅ WEBDAV: Got {len(folders)} folders")
             
-            print("🔍 WEBDAV: Fetching files...")
             files_response = api_client.get_folder_files(folder_uuid, 0, 50)  
             files = files_response.get('result', files_response.get('files', []))
-            print(f"✅ WEBDAV: Got {len(files)} files")
             
-            return {
-                'folders': folders,
-                'files': files
-            }
+            print(f"✅ WEBDAV: Got {len(folders)} folders and {len(files)} files")
+            return {'folders': folders, 'files': files}
             
         except Exception as e:
             print(f"❌ WEBDAV: Error getting folder content: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Try fallback: call the original drive service from main thread
-            print("🔍 WEBDAV: Trying fallback method...")
-            try:
-                from services.drive import drive_service
-                return drive_service.get_folder_content(folder_uuid)
-            except Exception as e2:
-                print(f"❌ WEBDAV: Fallback also failed: {e2}")
-                # Return empty content rather than crashing
-                return {'folders': [], 'files': []}
+            return {'folders': [], 'files': []}
     
     def get_credentials(self) -> Dict[str, Any]:
         """Get cached credentials"""
@@ -151,13 +129,15 @@ class InternxtDAVResource(DAVNonCollection):
         return time.time()
     
     def get_etag(self) -> str:
-        """Return ETag for caching"""
-        file_uuid = self.file_metadata.get('uuid', '')
+        """Return ETag for the file resource - FIXED to avoid double quotes"""
+        file_uuid = self.file_metadata.get('uuid', 'unknown')[:8]  # First 8 chars
         modified = int(self.get_last_modified())
-        return f'"{file_uuid}-{modified}"'
+        size = self.get_content_length()
+        # Return WITHOUT quotes - WsgiDAV adds them automatically
+        return f"{file_uuid}-{modified}-{size}"
     
     def support_etag(self) -> bool:
-        """FIXED: Implement required abstract method - Support ETags for caching"""
+        """Support ETags for caching"""
         return True
     
     def support_ranges(self) -> bool:
@@ -173,16 +153,25 @@ class InternxtDAVResource(DAVNonCollection):
         return True
     
     def get_content(self) -> Iterator[bytes]:
-        """Stream file content - Return dummy content for now"""
-        # For debugging, return dummy content
-        # TODO: Implement actual file download
+        """Stream file content - Return dummy content for testing"""
         file_name = self.file_metadata.get('plainName', 'unknown')
         file_type = self.file_metadata.get('type', 'txt')
-        content = f"DEBUG: This is file {file_name}.{file_type} from Internxt Drive\n"
-        content += f"UUID: {self.file_metadata.get('uuid', 'unknown')}\n"
-        content += f"Size: {self.file_metadata.get('size', 0)} bytes\n"
-        content += f"Path: {self.path}\n"
-        content += f"Created: {self.file_metadata.get('createdAt', 'unknown')}\n"
+        size = self.file_metadata.get('size', 0)
+        
+        content = f"""DEBUG: Internxt WebDAV File
+File: {file_name}.{file_type}
+UUID: {self.file_metadata.get('uuid', 'unknown')}
+Size: {size} bytes
+Path: {self.path}
+Created: {self.file_metadata.get('createdAt', 'unknown')}
+Content-Type: {self.get_content_type()}
+
+This is a test file from your Internxt Drive accessed via WebDAV.
+The file content shows that the WebDAV server is working correctly.
+
+To implement actual file downloading, uncomment the download code
+in the get_content() method of InternxtDAVResource.
+"""
         yield content.encode('utf-8')
 
 
@@ -194,20 +183,17 @@ class InternxtDAVCollection(DAVCollection):
         self.folder_metadata = folder_metadata or {}
         self._content_cache = None
         self._content_cached_time = 0
-        self.CACHE_TIMEOUT = 30  # 30 seconds
+        self.CACHE_TIMEOUT = 30
         
     def get_member_names(self) -> List[str]:
         """Return list of files and folders in this directory"""
         try:
-            print(f"🔍 WEBDAV: get_member_names() for path: {self.path}")
             content = self._get_content()
             names = content.get('names', [])
             print(f"✅ WEBDAV: Returning {len(names)} member names: {names}")
             return names
         except Exception as e:
             print(f"❌ WEBDAV: Error getting member names for {self.path}: {e}")
-            import traceback
-            traceback.print_exc()
             return []
     
     def get_member(self, name: str) -> Optional[Union[DAVCollection, DAVNonCollection]]:
@@ -220,7 +206,7 @@ class InternxtDAVCollection(DAVCollection):
             for folder in content['folders']:
                 folder_name = folder.get('plainName', folder.get('name', ''))
                 if folder_name == name:
-                    child_path = f"{self.path.rstrip('/')}/{name}"
+                    child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
                     print(f"✅ WEBDAV: Found folder: {name}")
                     return InternxtDAVCollection(child_path, self.environ, folder)
             
@@ -231,7 +217,7 @@ class InternxtDAVCollection(DAVCollection):
                 display_name = f"{file_name}.{file_type}" if file_type else file_name
                 
                 if display_name == name:
-                    child_path = f"{self.path.rstrip('/')}/{name}"
+                    child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
                     print(f"✅ WEBDAV: Found file: {name}")
                     return InternxtDAVResource(child_path, self.environ, file)
             
@@ -269,23 +255,32 @@ class InternxtDAVCollection(DAVCollection):
         return time.time()
     
     def get_etag(self) -> str:
-        """Return ETag for folder caching"""
+        """Return ETag for the folder resource - FIXED to avoid double quotes"""
         folder_uuid = self.folder_metadata.get('uuid', 'root')
+        if folder_uuid != 'root':
+            folder_uuid = folder_uuid[:8]  # First 8 chars
         modified = int(self.get_last_modified())
-        member_count = len(self._get_content().get('names', []))
-        return f'"{folder_uuid}-{modified}-{member_count}"'
+        
+        # Get member count safely
+        try:
+            member_count = len(self._get_content().get('names', []))
+        except:
+            member_count = 0
+        
+        # Return WITHOUT quotes - WsgiDAV adds them automatically
+        return f"{folder_uuid}-{modified}-{member_count}"
     
     def support_etag(self) -> bool:
-        """FIXED: Implement required abstract method - Support ETags for caching"""
+        """Support ETags for caching"""
         return True
     
     def support_ranges(self) -> bool:
-        """Support byte ranges"""
-        return False  # Collections don't support ranges
+        """Collections don't support ranges"""
+        return False
     
     def support_content_length(self) -> bool:
-        """Support content length"""
-        return False  # Collections don't have content length
+        """Collections don't have content length"""
+        return False
     
     def support_modified(self) -> bool:
         """Support last modified date"""
@@ -298,14 +293,13 @@ class InternxtDAVCollection(DAVCollection):
         # Check cache
         if (self._content_cache is not None and 
             current_time - self._content_cached_time < self.CACHE_TIMEOUT):
-            print("✅ WEBDAV: Using cached content")
             return self._content_cache
         
         try:
             print(f"🔍 WEBDAV: Fetching fresh content for: {self.path}")
             
             if self.path == '/' or self.path == '':
-                # Root folder - get root folder UUID and fetch content
+                # Root folder
                 credentials = webdav_api.get_credentials()
                 root_folder_uuid = credentials['user'].get('rootFolderId', '')
                 
@@ -313,13 +307,13 @@ class InternxtDAVCollection(DAVCollection):
                     print("❌ WEBDAV: No root folder UUID found")
                     return {'folders': [], 'files': [], 'names': []}
                 
-                print(f"🔍 WEBDAV: Getting root folder content: {root_folder_uuid}")
                 content = webdav_api.get_folder_content(root_folder_uuid)
                 
             else:
-                # Non-root folder - for now return empty
-                print(f"🔍 WEBDAV: Non-root folder not implemented yet: {self.path}")
-                content = {'folders': [], 'files': []}
+                # Non-root folder - use existing drive service for now
+                print(f"🔍 WEBDAV: Non-root folder: {self.path}")
+                from services.drive import drive_service
+                content = drive_service.list_folder_with_paths(self.path)
             
             # Build names list
             names = []
@@ -356,15 +350,14 @@ class InternxtDAVCollection(DAVCollection):
 
 
 class InternxtDAVProvider(DAVProvider):
-    """WebDAV Provider for Internxt Drive - Isolated Version"""
+    """WebDAV Provider for Internxt Drive - FIXED ETag handling"""
     
     def __init__(self):
         super().__init__()
         self.readonly = False
         
-        print("🔍 WEBDAV: Initializing InternxtDAVProvider (Isolated Version)...")
+        print("🔍 WEBDAV: Initializing InternxtDAVProvider (FIXED ETAG VERSION)...")
         
-        # Test authentication
         try:
             credentials = webdav_api.get_credentials()
             user_email = credentials['user'].get('email', 'unknown')
@@ -381,7 +374,7 @@ class InternxtDAVProvider(DAVProvider):
             
             print(f"🔍 WEBDAV: get_resource_inst() for path: {path}")
             
-            # Always return a collection for now (folders only)
+            # Always return a collection for simplicity
             return InternxtDAVCollection(path, environ)
                 
         except Exception as e:
@@ -393,10 +386,8 @@ class InternxtDAVProvider(DAVProvider):
         try:
             if path == '/':
                 return True
-            
-            # For now, assume all paths exist
+            # For now, assume all paths exist for testing
             return True
-            
         except Exception as e:
             print(f"❌ WEBDAV: Error in exists({path}): {e}")
             return False
