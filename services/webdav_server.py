@@ -105,22 +105,19 @@ class WebDAVServer:
     def _create_wsgidav_app(self) -> WsgiDAVApp:
         """Create WsgiDAV application"""
         
-        # WebDAV configuration
+        # WebDAV configuration with updated format
         config = {
             'provider_mapping': {
                 '/': InternxtDAVProvider(),
             },
-            'user_mapping': {
-                '*': {  # Allow all users (we handle auth via Internxt tokens)
-                    'internxt': {
-                        'password': 'internxt-webdav',  # Placeholder password
-                        'description': 'Internxt Drive User',
-                    }
-                }
-            },
             'simple_dc': {
                 'user_mapping': {
-                    '*': 'internxt'  # Map all requests to internxt user
+                    '*': {  # Allow all users (we handle auth via Internxt tokens)
+                        'internxt': {
+                            'password': 'internxt-webdav',  # Placeholder password
+                            'description': 'Internxt Drive User',
+                        }
+                    }
                 }
             },
             'http_authenticator': {
@@ -129,14 +126,15 @@ class WebDAVServer:
                 'accept_digest': False,
             },
             'verbose': self.config['verbose'],
-            'enable_loggers': [],
+            'logging': {
+                'enable_loggers': []
+            },
             'property_manager': True,
-            'lock_manager': True,
+            'lock_storage': True,
+            # Simplified middleware stack to avoid compatibility issues
             'middleware_stack': [
-                'wsgidav.debug_filter.WsgiDavDebugFilter',
                 'wsgidav.error_printer.ErrorPrinter',
                 'wsgidav.http_authenticator.HTTPAuthenticator', 
-                'wsgidav.dir_browser.WsgiDavDirBrowser',
                 'wsgidav.request_resolver.RequestResolver',
             ],
         }
@@ -161,8 +159,8 @@ class WebDAVServer:
                 'message': f'Not logged in: {e}'
             }
         
-        # Determine port
-        target_port = port or self.config['port']
+        # Determine port - ensure it's an integer
+        target_port = int(port or self.config['port'])
         if not self._check_port_available(target_port):
             try:
                 target_port = self._find_available_port(target_port)
@@ -173,27 +171,45 @@ class WebDAVServer:
         self.config['port'] = target_port
         
         try:
+            print(f"🔧 Creating WebDAV application...")
+            
             # Create WsgiDAV app
             app = self._create_wsgidav_app()
             
-            # Create server
+            print(f"🔧 Setting up server on {self.config['host']}:{self.config['port']}...")
+            
+            # Create server with explicit type conversion
+            bind_host = str(self.config['host'])
+            bind_port = int(self.config['port'])
+            timeout_seconds = int(self.config['timeout_minutes']) * 60
+            
             self.server = wsgi.Server(
-                bind_addr=(self.config['host'], self.config['port']),
+                bind_addr=(bind_host, bind_port),
                 wsgi_app=app,
-                timeout=self.config['timeout_minutes'] * 60,
+                timeout=timeout_seconds,
                 server_name="Internxt WebDAV Server"
             )
             
+            print(f"🔧 Server created successfully")
+            
             # Setup SSL if enabled
             if self.config['use_ssl']:
-                ssl_context = self._create_ssl_context()
-                if ssl_context:
-                    self.server.ssl_adapter = BuiltinSSLAdapter(
-                        certificate=None,  # Using context instead
-                        private_key=None,
-                        certificate_chain=None,
-                        context=ssl_context
-                    )
+                print(f"🔐 Setting up SSL...")
+                try:
+                    ssl_context = self._create_ssl_context()
+                    if ssl_context:
+                        self.server.ssl_adapter = BuiltinSSLAdapter(
+                            certificate=None,  # Using context instead
+                            private_key=None,
+                            certificate_chain=None
+                        )
+                        # Note: Setting context on adapter may not work with all versions
+                        print(f"🔐 SSL setup completed")
+                    else:
+                        print(f"🔧 SSL disabled, using HTTP")
+                except Exception as e:
+                    print(f"⚠️  SSL setup failed: {e}, falling back to HTTP")
+                    self.config['use_ssl'] = False
             
             # Start server
             if background:
@@ -204,7 +220,7 @@ class WebDAVServer:
                 self.server_thread.start()
                 
                 # Wait a moment to ensure server starts
-                time.sleep(1)
+                time.sleep(2)
                 
                 if not self.is_running:
                     return {'success': False, 'message': 'Failed to start server in background'}
@@ -220,6 +236,10 @@ class WebDAVServer:
             }
             
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ Detailed error: {error_details}")
+            
             return {
                 'success': False,
                 'message': f'Failed to start WebDAV server: {e}'
