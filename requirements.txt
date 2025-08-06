@@ -1,10 +1,18 @@
-requests>=2.31.0
+# Core dependencies for Internxt CLI
 cryptography>=41.0.0
 mnemonic>=0.20
+requests>=2.31.0
 click>=8.1.0
-pathlib>=1.0.1
-tqdm>=4.65.0
-keyring>=24.0.0
-Flask>=2.3.0
-Werkzeug>=2.3.0
-bip39>=0.0.2
+tqdm>=4.66.0
+
+# WebDAV server dependencies
+WsgiDAV>=4.3.0
+cheroot>=10.0.0
+
+# Optional: for better SSL certificate handling
+pyOpenSSL>=23.0.0
+
+# Development dependencies (optional)
+# pytest>=7.4.0
+# black>=23.0.0
+# flake8>=6.0.0
