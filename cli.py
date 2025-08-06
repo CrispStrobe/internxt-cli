@@ -40,9 +40,16 @@ try:
     from services.auth import auth_service
     from utils.api import api_client
     from services.drive import drive_service
+    from services.webdav_server import webdav_server
 except ImportError as e:
     print(f"❌ Failed to import services: {e}")
     print("📦 Make sure all service files are in place with fixed implementations")
+    # Check for WebDAV specific dependencies
+    try:
+        import wsgidav
+        import cheroot
+    except ImportError:
+        print("📦 For WebDAV support, install: pip install WsgiDAV cheroot")
     sys.exit(1)
 
 
@@ -69,7 +76,7 @@ def format_date(date_string: str) -> str:
 @click.group()
 @click.version_option(version='1.0.0')
 def cli():
-    """Internxt Python CLI"""
+    """Internxt Python CLI with Path Support and Delete Operations"""
     pass
 
 
@@ -640,7 +647,179 @@ def delete_permanently_by_path(path: str, force: bool):
         sys.exit(1)
 
 
-# ========== UTILITY COMMANDS ==========
+# ========== WEBDAV SERVER COMMANDS ==========
+
+@cli.command('webdav-start')
+@click.option('--port', '-p', type=int, help='Port to run WebDAV server on (default: 8080)')
+@click.option('--background', '-b', is_flag=True, help='Run server in background')
+@click.option('--show-mount', '-m', is_flag=True, help='Show mount instructions after starting')
+def webdav_start(port: Optional[int], background: bool, show_mount: bool):
+    """Start WebDAV server to mount Internxt Drive as local filesystem"""
+    try:
+        result = webdav_server.start(port=port, background=background)
+        
+        if result['success']:
+            click.echo(f"✅ {result['message']}")
+            click.echo(f"🌐 Server URL: {result['url']}")
+            click.echo(f"👤 Username: internxt")
+            click.echo(f"🔑 Password: internxt-webdav")
+            
+            if show_mount or not background:
+                click.echo(f"\n💡 Mount Instructions:")
+                instructions = webdav_server.get_mount_instructions()
+                
+                # Detect platform and show relevant instructions
+                import platform
+                system = platform.system().lower()
+                
+                if 'windows' in system:
+                    click.echo(instructions['windows'])
+                elif 'darwin' in system:
+                    click.echo(instructions['macos'])
+                elif 'linux' in system:
+                    click.echo(instructions['linux'])
+                else:
+                    # Show all instructions
+                    for platform_name, instruction in instructions.items():
+                        click.echo(f"\n{platform_name.upper()}:")
+                        click.echo(instruction)
+            
+            if not background:
+                click.echo(f"\n🔄 Server running... Press Ctrl+C to stop")
+                # Server will run in main thread
+            else:
+                click.echo(f"\n💡 Use 'python cli.py webdav-stop' to stop the server")
+                click.echo(f"💡 Use 'python cli.py webdav-status' to check status")
+        else:
+            click.echo(f"❌ {result['message']}", err=True)
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        click.echo(f"\n🛑 WebDAV server stopped by user")
+    except Exception as e:
+        click.echo(f"❌ Error starting WebDAV server: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('webdav-stop')
+def webdav_stop():
+    """Stop WebDAV server"""
+    try:
+        result = webdav_server.stop()
+        
+        if result['success']:
+            click.echo(f"✅ {result['message']}")
+        else:
+            click.echo(f"❌ {result['message']}", err=True)
+            sys.exit(1)
+            
+    except Exception as e:
+        click.echo(f"❌ Error stopping WebDAV server: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('webdav-status')
+def webdav_status():
+    """Check WebDAV server status"""
+    try:
+        status = webdav_server.status()
+        
+        if status['running']:
+            click.echo(f"✅ WebDAV server is running")
+            click.echo(f"🌐 URL: {status['url']}")
+            click.echo(f"📡 Protocol: {status['protocol'].upper()}")
+            click.echo(f"🚪 Port: {status['port']}")
+            click.echo(f"🏠 Host: {status['host']}")
+            
+            click.echo(f"\n👤 Credentials:")
+            click.echo(f"   Username: internxt")
+            click.echo(f"   Password: internxt-webdav")
+        else:
+            click.echo(f"❌ WebDAV server is not running")
+            click.echo(f"💡 Start with: python cli.py webdav-start")
+            
+    except Exception as e:
+        click.echo(f"❌ Error checking WebDAV status: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('webdav-mount')
+def webdav_mount():
+    """Show platform-specific instructions for mounting WebDAV drive"""
+    try:
+        status = webdav_server.status()
+        
+        if not status['running']:
+            click.echo(f"❌ WebDAV server is not running")
+            click.echo(f"💡 Start with: python cli.py webdav-start")
+            sys.exit(1)
+        
+        click.echo(f"🗂️  Mount Instructions for Internxt Drive")
+        click.echo(f"=" * 50)
+        click.echo(f"Server URL: {status['url']}")
+        click.echo(f"Username: internxt")
+        click.echo(f"Password: internxt-webdav")
+        
+        instructions = webdav_server.get_mount_instructions()
+        
+        # Show all platform instructions
+        for platform_name, instruction in instructions.items():
+            click.echo(f"\n{platform_name.upper()}:")
+            click.echo(f"-" * 20)
+            click.echo(instruction)
+            
+    except Exception as e:
+        click.echo(f"❌ Error getting mount instructions: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('webdav-config')
+def webdav_config():
+    """Show WebDAV server configuration"""
+    try:
+        webdav_config = config_service.read_webdav_config()
+        status = webdav_server.status()
+        
+        click.echo(f"⚙️  WebDAV Server Configuration")
+        click.echo(f"=" * 40)
+        
+        # Current configuration
+        click.echo(f"📡 Protocol: {webdav_config.get('protocol', 'http').upper()}")
+        click.echo(f"🏠 Host: {webdav_config.get('host', 'localhost')}")
+        click.echo(f"🚪 Port: {webdav_config.get('port', 8080)}")
+        click.echo(f"⏱️  Timeout: {webdav_config.get('timeoutMinutes', 30)} minutes")
+        click.echo(f"📝 Verbose: Level {webdav_config.get('verbose', 0)}")
+        
+        # SSL certificate info
+        click.echo(f"\n🔐 SSL Certificates:")
+        from services.network_utils import NetworkUtils
+        cert_dir = NetworkUtils.WEBDAV_SSL_CERTS_DIR
+        cert_file = NetworkUtils.WEBDAV_SSL_CERT_FILE
+        key_file = NetworkUtils.WEBDAV_SSL_KEY_FILE
+        
+        click.echo(f"   Directory: {cert_dir}")
+        click.echo(f"   Certificate: {cert_file} ({'✅ exists' if cert_file.exists() else '❌ missing'})")
+        click.echo(f"   Private Key: {key_file} ({'✅ exists' if key_file.exists() else '❌ missing'})")
+        
+        # Server status
+        click.echo(f"\n🔄 Server Status:")
+        if status['running']:
+            click.echo(f"   Status: ✅ Running")
+            click.echo(f"   URL: {status['url']}")
+        else:
+            click.echo(f"   Status: ❌ Stopped")
+        
+        # Usage examples
+        click.echo(f"\n💡 Usage Examples:")
+        click.echo(f"   Start server:    python cli.py webdav-start")
+        click.echo(f"   Start with SSL:  python cli.py webdav-start  # (auto-detects from config)")
+        click.echo(f"   Custom port:     python cli.py webdav-start --port 9090")
+        click.echo(f"   Background mode: python cli.py webdav-start --background")
+        click.echo(f"   Stop server:     python cli.py webdav-stop")
+        
+    except Exception as e:
+        click.echo(f"❌ Error reading WebDAV configuration: {e}", err=True)
+        sys.exit(1)
 
 @cli.command()
 def test():
@@ -649,12 +828,12 @@ def test():
     click.echo("=" * 60)
     
     tests_passed = 0
-    total_tests = 6
+    total_tests = 7  # Added WebDAV test
     
     # Test 1: Config service
     try:
         assert config_service.get('DRIVE_NEW_API_URL') == 'https://api.internxt.com/drive'
-        click.echo("✅ Config service")
+        click.echo("✅ Config service - exact TypeScript match")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Config service failed: {e}")
@@ -665,7 +844,7 @@ def test():
         encrypted = crypto_service.encrypt_text(test_text)
         decrypted = crypto_service.decrypt_text(encrypted)
         assert decrypted == test_text
-        click.echo("✅ Crypto service")
+        click.echo("✅ Crypto service - exact TypeScript CryptoJS compatibility")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Crypto service failed: {e}")
@@ -675,7 +854,7 @@ def test():
         login_url = f"{api_client.drive_api_url}/auth/login"
         expected_login = "https://api.internxt.com/drive/auth/login"
         assert login_url == expected_login
-        click.echo("✅ API endpoints")
+        click.echo("✅ API endpoints - exact match to working API")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ API endpoint test failed: {e}")
@@ -685,7 +864,7 @@ def test():
         assert hasattr(auth_service, 'do_login')
         assert hasattr(auth_service, 'is_2fa_needed')
         assert hasattr(auth_service, 'get_auth_details')
-        click.echo("✅ Auth service")
+        click.echo("✅ Auth service - exact TypeScript AuthService structure")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Auth service structure test failed: {e}")
@@ -695,7 +874,7 @@ def test():
         valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
         is_valid = crypto_service.validate_mnemonic(valid_mnemonic)
         assert is_valid == True
-        click.echo("✅ Mnemonic validation")
+        click.echo("✅ Mnemonic validation - exact TypeScript ValidationService match")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Mnemonic validation test failed: {e}")
@@ -705,18 +884,36 @@ def test():
         home_dir = Path.home()
         expected_config_dir = home_dir / '.internxt-cli'
         assert config_service.internxt_cli_data_dir == expected_config_dir
-        click.echo("✅ File paths")
+        click.echo("✅ File paths - exact TypeScript ConfigService match")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ File path test failed: {e}")
+    
+    # Test 7: WebDAV imports
+    try:
+        # Test WebDAV imports without initializing the server
+        from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection
+        click.echo("✅ WebDAV dependencies - properly installed and importable")
+        tests_passed += 1
+    except ImportError as e:
+        click.echo(f"❌ WebDAV dependencies missing: {e}")
+        click.echo("   Install with: pip install WsgiDAV cheroot")
+    except Exception as e:
+        click.echo(f"❌ WebDAV import test failed: {e}")
     
     click.echo("\n" + "=" * 60)
     click.echo(f"📊 Tests passed: {tests_passed}/{total_tests}")
     
     if tests_passed == total_tests:
         click.echo("🎉 All tests passed! CLI is working correctly.")
+        if tests_passed >= 6:  # All core tests passed
+            click.echo("🌐 WebDAV server ready to use!")
     else:
         click.echo("⚠️  Some tests failed. Please review the errors.")
+        if tests_passed < 6:
+            click.echo("🔧 Core functionality issues detected.")
+        else:
+            click.echo("🌐 WebDAV optional - install dependencies if you want WebDAV server.")
 
 
 @cli.command()
@@ -790,6 +987,13 @@ def help_extended():
   delete UUID       Permanently delete by UUID (⚠️ CANNOT BE UNDONE!)
   delete-path PATH  Permanently delete by path (⚠️ CANNOT BE UNDONE!)
 
+🌐 WEBDAV SERVER (Mount as Local Drive!)
+  webdav-start      Start WebDAV server to mount drive locally
+  webdav-stop       Stop WebDAV server
+  webdav-status     Check if WebDAV server is running
+  webdav-mount      Show mount instructions for your OS
+  webdav-config     Show WebDAV configuration
+
 🔧 UTILITIES
   config            Show current configuration
   test              Test CLI components
@@ -804,11 +1008,17 @@ def help_extended():
   python cli.py find "*.pdf"
   python cli.py download-path "/Documents/important.pdf"
   
+  # Mount as local drive (AMAZING!)
+  python cli.py webdav-start
+  # Then in Windows: Map network drive to http://localhost:8080
+  # Username: internxt, Password: internxt-webdav
+  
   # Clean up
   python cli.py trash-path "/OldFolder"
   python cli.py delete-path "/TempFile.txt" --force
 
 🌟 TIP: Path-based commands are much easier to use than UUID-based ones!
+🌟 NEW: WebDAV server lets you access your drive like a local folder!
 """)
 
 

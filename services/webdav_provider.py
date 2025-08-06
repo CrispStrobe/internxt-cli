@@ -8,13 +8,13 @@ import os
 import io
 import time
 import tempfile
-from typing import Dict, Any, List, Optional, Iterator
+from typing import Dict, Any, List, Optional, Iterator, Union
 from pathlib import Path
 
 try:
-    from wsgidav.dav_provider import DAVProvider, DAVResource, DAVCollection
-    from wsgidav.dav_error import DAVError, HTTP_NOT_FOUND, HTTP_FORBIDDEN, HTTP_CONFLICT
-    from wsgidav.util import get_content_type
+    from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection, HTTP_NOT_FOUND, HTTP_FORBIDDEN
+    from wsgidav.dav_error import DAVError, HTTP_CONFLICT
+    import mimetypes
 except ImportError:
     print("❌ Missing WebDAV dependency. Install with: pip install WsgiDAV")
     raise
@@ -23,7 +23,7 @@ from services.drive import drive_service
 from services.auth import auth_service
 
 
-class InternxtDAVResource(DAVResource):
+class InternxtDAVResource(DAVNonCollection):
     """Represents a file in Internxt Drive for WebDAV access"""
     
     def __init__(self, path: str, environ: dict, file_metadata: dict):
@@ -47,7 +47,9 @@ class InternxtDAVResource(DAVResource):
         else:
             full_name = file_name
             
-        return get_content_type(full_name)
+        # Use Python's mimetypes module to guess content type
+        content_type, _ = mimetypes.guess_type(full_name)
+        return content_type or 'application/octet-stream'
     
     def get_creation_date(self) -> float:
         """Return file creation time as timestamp"""
@@ -179,7 +181,7 @@ class InternxtDAVCollection(DAVCollection):
             print(f"Error getting member names for {self.path}: {e}")
             return []
     
-    def get_member(self, name: str) -> Optional[DAVResource]:
+    def get_member(self, name: str) -> Optional[Union[DAVCollection, DAVNonCollection]]:
         """Get a specific member (file or folder) by name"""
         try:
             content = self._get_cached_content()
@@ -207,7 +209,7 @@ class InternxtDAVCollection(DAVCollection):
             print(f"Error getting member {name} from {self.path}: {e}")
             return None
     
-    def create_empty_resource(self, name: str) -> DAVResource:
+    def create_empty_resource(self, name: str) -> DAVNonCollection:
         """Create a new empty file"""
         child_path = f"{self.path.rstrip('/')}/{name}"
         
@@ -340,7 +342,7 @@ class InternxtDAVProvider(DAVProvider):
             print(f"❌ WebDAV Provider initialization failed: {e}")
             raise
     
-    def get_resource_inst(self, path: str, environ: dict) -> Optional[DAVResource]:
+    def get_resource_inst(self, path: str, environ: dict) -> Optional[Union[DAVCollection, DAVNonCollection]]:
         """Get DAV resource for given path"""
         try:
             # Normalize path
