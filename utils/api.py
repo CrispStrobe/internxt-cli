@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 internxt_cli/utils/api.py
-API client for Internxt services - Enhanced with trash/delete operations
+API client matching Internxt SDK
 """
 
 import requests
@@ -10,13 +10,12 @@ import sys
 import os
 from typing import Dict, Any, Optional
 
-# Corrected relative import
 from config.config import config_service
 
 
 class ApiClient:
     """
-    HTTP client for Internxt API - Enhanced with trash/delete operations
+    HTTP client for Internxt API based on actual SDK endpoints
     """
 
     def __init__(self):
@@ -66,6 +65,8 @@ class ApiClient:
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Network request failed for {url}: {e}") from e
 
+    # ========== HTTP VERB METHODS ==========
+
     def get(self, url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make GET request and return JSON"""
         response = self._make_request("GET", url, params=params, headers=headers, auth=auth)
@@ -91,7 +92,7 @@ class ApiClient:
         response = self._make_request("PATCH", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
 
-    # --- AUTH API ENDPOINTS ---
+    # ========== AUTH API ENDPOINTS ==========
 
     def security_details(self, email: str) -> Dict[str, Any]:
         """Gets security details (sKey and 2FA status)."""
@@ -103,7 +104,7 @@ class ApiClient:
         url = f"{self.drive_api_url}/auth/login/access"
         return self.post(url, data=payload)
 
-    # --- STORAGE API ENDPOINTS ---
+    # ========== STORAGE API ENDPOINTS ==========
     
     def get_folder_folders(self, folder_uuid: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         """Get subfolders in folder"""
@@ -118,36 +119,13 @@ class ApiClient:
         return self.get(url, params)
 
     def create_folder(self, plain_name: str, parent_folder_uuid: str) -> Dict[str, Any]:
-        """Create new folder"""
+        """Create new folder using UUID-based endpoint"""
         url = f"{self.drive_api_url}/folders"
         data = {'plainName': plain_name, 'parentFolderUuid': parent_folder_uuid}
         return self.post(url, data)
-    
-    # --- NETWORK API ENDPOINTS ---
-    
-    def start_upload(self, bucket_id: str, file_size: int, auth: tuple) -> Dict[str, Any]:
-        """Gets upload URLs for a file, using Basic Auth."""
-        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start"
-        data = {'uploads': [{'index': 0, 'size': file_size}]}
-        return self.post(url, data, auth=auth)
 
-    def upload_chunk(self, upload_url: str, chunk_data: bytes):
-        """Uploads a raw chunk of data using PUT. No auth needed for pre-signed URL."""
-        response = requests.put(upload_url, data=chunk_data, headers={'Content-Type': 'application/octet-stream'}, timeout=300)
-        response.raise_for_status()
-
-    def finish_upload(self, bucket_id: str, payload: Dict[str, Any], auth: tuple) -> Dict[str, Any]:
-        """Finalizes an upload, using Basic Auth."""
-        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/finish"
-        return self.post(url, data=payload, auth=auth)
+    # ========== METADATA OPERATIONS (CORRECTED) ==========
     
-    # --- FILE/FOLDER OPERATIONS ---
-    
-    def create_file_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Creates the file metadata entry in the Drive, matching the SDK blueprint."""
-        url = f"{self.drive_api_url}/files"
-        return self.post(url, data=payload)
-
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
         """Get file metadata"""
         url = f"{self.drive_api_url}/files/{file_uuid}/meta"
@@ -158,36 +136,132 @@ class ApiClient:
         url = f"{self.drive_api_url}/folders/{folder_uuid}/meta"
         return self.get(url)
 
-    # --- DELETE/TRASH OPERATIONS ---
+    # ========== UPDATE METADATA OPERATIONS ==========
+
+    def update_file_metadata(self, file_uuid: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update file metadata 
+        Real SDK: PUT /files/{fileUuid}/meta
+        """
+        url = f"{self.drive_api_url}/files/{file_uuid}/meta"
+        return self.put(url, data=update_data)
+
+    def update_folder_metadata(self, folder_uuid: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update folder metadata
+        Real SDK: PUT /folders/{folderUuid}/meta  
+        """
+        url = f"{self.drive_api_url}/folders/{folder_uuid}/meta"
+        return self.put(url, data=update_data)
+
+    # ========== MOVE OPERATIONS ==========
+    
+    def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """
+        Move file to different folder
+        Real SDK: PATCH /files/{fileUuid} with destinationFolder field
+        """
+        url = f"{self.drive_api_url}/files/{file_uuid}"
+        data = {'destinationFolder': destination_folder_uuid}  # field name
+        return self.patch(url, data)
+
+    def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """
+        Move folder to different folder  
+        Real SDK: PATCH /folders/{folderUuid} with destinationFolder field
+        """
+        url = f"{self.drive_api_url}/folders/{folder_uuid}"
+        data = {'destinationFolder': destination_folder_uuid}  # field name
+        return self.patch(url, data)
+
+    def rename_file(self, file_uuid: str, new_name: str, new_type: str = None) -> Dict[str, Any]:
+        """
+        Rename file using metadata update
+        Real SDK: PUT /files/{fileUuid}/meta
+        """
+        data = {'plainName': new_name}
+        if new_type is not None:
+            data['type'] = new_type
+        return self.update_file_metadata(file_uuid, data)
+
+    def rename_folder(self, folder_uuid: str, new_name: str) -> Dict[str, Any]:
+        """
+        Rename folder using metadata update
+        Real SDK: PUT /folders/{folderUuid}/meta
+        """
+        data = {'plainName': new_name}
+        return self.update_folder_metadata(folder_uuid, data)
+
+    # ========== DELETE/TRASH OPERATIONS ==========
     
     def delete_file(self, file_uuid: str) -> Dict[str, Any]:
-        """Delete a file (moves to trash or deletes permanently depending on API)"""
+        """
+        Delete file (moves to trash)
+        Real SDK: DELETE /files/{fileId}
+        """
         url = f"{self.drive_api_url}/files/{file_uuid}"
         return self.delete(url)
 
     def delete_folder(self, folder_uuid: str) -> Dict[str, Any]:
-        """Delete a folder (moves to trash or deletes permanently depending on API)"""
+        """
+        Delete folder (moves to trash)
+        Real SDK: DELETE /folders/{folderId}
+        """
         url = f"{self.drive_api_url}/folders/{folder_uuid}"
         return self.delete(url)
 
+    # ========== TRASH OPERATIONS ==========
+    
+    def trash_file(self, file_uuid: str) -> Dict[str, Any]:
+        """
+        Move individual file to trash
+        Real SDK: Only has bulk trash, so we use that with single item
+        """
+        return self.trash_items({'items': [{'uuid': file_uuid, 'type': 'file'}]})
+
+    def trash_folder(self, folder_uuid: str) -> Dict[str, Any]:
+        """
+        Move individual folder to trash  
+        Real SDK: Only has bulk trash, so we use that with single item
+        """
+        return self.trash_items({'items': [{'uuid': folder_uuid, 'type': 'folder'}]})
+
     def trash_items(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Add items to trash - matches TrashService.trashItems()"""
-        url = f"{self.drive_api_url}/trash"
+        """
+        Add items to trash - bulk operation
+        Real SDK: POST /storage/trash/add
+        """
+        url = f"{self.drive_api_url}/storage/trash/add"
         return self.post(url, data=payload)
 
+    # ========== NO COPY OPERATIONS ==========
+    # The real SDK doesn't have server-side copy operations
+    # So our drive service fallback (download + re-upload) is correct
+
+    # ========== TRASH MANAGEMENT (CORRECTED) ==========
+    
     def get_trash_content(self, offset: int = 0, limit: int = 50, item_type: str = 'both') -> Dict[str, Any]:
-        """Get trash content"""
-        url = f"{self.drive_api_url}/trash"
+        """
+        Get trash content
+        Real SDK: GET /storage/trash with pagination params
+        """
+        url = f"{self.drive_api_url}/storage/trash/paginated"
         params = {'offset': offset, 'limit': limit, 'type': item_type}
         return self.get(url, params)
 
     def clear_trash(self) -> Dict[str, Any]:
-        """Clear all items from trash permanently"""
-        url = f"{self.drive_api_url}/trash/clear"
+        """
+        Clear all items from trash permanently
+        Real SDK: DELETE /storage/trash/all
+        """
+        url = f"{self.drive_api_url}/storage/trash/all"
         return self.delete(url)
 
     def restore_item(self, item_uuid: str, item_type: str, destination_folder_uuid: str = None) -> Dict[str, Any]:
-        """Restore item from trash"""
+        """
+        Restore item from trash - keeping original implementation
+        (Not clearly shown in provided SDK snippets)
+        """
         url = f"{self.drive_api_url}/trash/restore"
         data = {
             'uuid': item_uuid,
@@ -197,43 +271,66 @@ class ApiClient:
         return self.post(url, data)
 
     def delete_permanently(self, item_uuid: str, item_type: str) -> Dict[str, Any]:
-        """Permanently delete item from trash"""
-        url = f"{self.drive_api_url}/trash/{item_uuid}"
-        params = {'type': item_type}
+        """
+        Permanently delete item from trash
+        Real SDK: DELETE /storage/trash with items array
+        """
+        url = f"{self.drive_api_url}/storage/trash"
+        data = {'items': [{'uuid': item_uuid, 'type': item_type}]}
         return self.delete(url, headers={'Content-Type': 'application/json'})
 
-    # --- MOVE/RENAME OPERATIONS ---
+    # ========== PATH-BASED OPERATIONS ==========
+
+    def get_folder_by_path(self, folder_path: str) -> Dict[str, Any]:
+        """
+        Get folder by path
+        Real SDK: GET /folders/meta?path={folderPath}
+        """
+        url = f"{self.drive_api_url}/folders/meta"
+        params = {'path': folder_path}
+        return self.get(url, params)
+
+    def get_file_by_path(self, file_path: str) -> Dict[str, Any]:
+        """
+        Get file by path  
+        Real SDK: GET /files/meta?path={filePath}
+        """
+        url = f"{self.drive_api_url}/files/meta"
+        params = {'path': file_path}
+        return self.get(url, params)
+
+    # ========== NETWORK API ENDPOINTS (CORRECTED) ==========
     
-    def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """Move file to different folder"""
-        url = f"{self.drive_api_url}/files/{file_uuid}/move"
-        data = {'destinationFolderUuid': destination_folder_uuid}
-        return self.patch(url, data)
+    def start_upload(self, bucket_id: str, file_size: int, auth: tuple) -> Dict[str, Any]:
+        """
+        Gets upload URLs for a file
+        Real SDK: POST /v2/buckets/{bucketId}/files/start?multiparts=1
+        """
+        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start?multiparts=1"
+        data = {'uploads': [{'index': 0, 'size': file_size}]}
+        return self.post(url, data, auth=auth)
 
-    def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """Move folder to different folder"""
-        url = f"{self.drive_api_url}/folders/{folder_uuid}/move"
-        data = {'destinationFolderUuid': destination_folder_uuid}
-        return self.patch(url, data)
+    def upload_chunk(self, upload_url: str, chunk_data: bytes):
+        """Uploads a raw chunk of data using PUT. No auth needed for pre-signed URL."""
+        response = requests.put(upload_url, data=chunk_data, headers={'Content-Type': 'application/octet-stream'}, timeout=300)
+        response.raise_for_status()
 
-    def rename_file(self, file_uuid: str, new_name: str) -> Dict[str, Any]:
-        """Rename file"""
-        url = f"{self.drive_api_url}/files/{file_uuid}"
-        data = {'plainName': new_name}
-        return self.patch(url, data)
+    def finish_upload(self, bucket_id: str, payload: Dict[str, Any], auth: tuple) -> Dict[str, Any]:
+        """
+        Finalizes an upload
+        Real SDK: POST /v2/buckets/{bucketId}/files/finish
+        """
+        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/finish"
+        return self.post(url, data=payload, auth=auth)
 
-    def rename_folder(self, folder_uuid: str, new_name: str) -> Dict[str, Any]:
-        """Rename folder"""
-        url = f"{self.drive_api_url}/folders/{folder_uuid}"
-        data = {'plainName': new_name}
-        return self.patch(url, data)
-
-    # --- DOWNLOAD OPERATIONS ---
-    
     def get_download_links(self, bucket_id: str, file_id: str, auth: tuple) -> Dict[str, Any]:
-        """Gets download URLs for a file, using Basic Auth."""
+        """
+        Gets download URLs for a file
+        Real SDK: GET /buckets/{bucketId}/files/{fileId}/info with x-api-version: 2 header
+        """
         url = f"{self.network_url}/buckets/{bucket_id}/files/{file_id}/info"
-        return self.get(url, headers={'x-api-version': '2'}, auth=auth)
+        headers = {'x-api-version': '2'}
+        return self.get(url, headers=headers, auth=auth)
 
     def download_chunk(self, download_url: str) -> bytes:
         """Downloads a raw chunk of data. No auth needed for pre-signed URL."""
@@ -241,7 +338,36 @@ class ApiClient:
         response.raise_for_status()
         return response.content
 
-    # --- UTILITY OPERATIONS ---
+    # ========== FILE OPERATIONS ==========
+    
+    def create_file_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Creates file metadata entry  
+        Real SDK: POST /files
+        """
+        url = f"{self.drive_api_url}/files"
+        return self.post(url, data=payload)
+
+    def replace_file(self, file_uuid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Replace file with new content
+        Real SDK: PUT /files/{uuid}
+        """
+        url = f"{self.drive_api_url}/files/{file_uuid}"
+        return self.put(url, data=payload)
+
+    # ========== SEARCH OPERATIONS ==========
+
+    def search_files(self, query: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+        """
+        Search for files and folders
+        Real SDK: GET /fuzzy/{search}?offset={offset}
+        """
+        url = f"{self.drive_api_url}/fuzzy/{query}"
+        params = {'offset': offset}
+        return self.get(url, params)
+
+    # ========== UTILITY OPERATIONS ==========
     
     def get_storage_usage(self) -> Dict[str, Any]:
         """Get storage usage information"""
@@ -253,33 +379,55 @@ class ApiClient:
         url = f"{self.drive_api_url}/users/me"
         return self.get(url)
 
-    # --- LEGACY/COMPATIBILITY METHODS ---
+    def health_check(self) -> Dict[str, Any]:
+        """Basic health check"""
+        try:
+            return self.get_user_info()
+        except:
+            return {'status': 'error', 'message': 'Health check failed'}
+
+    # ========== WEBDAV COMPATIBILITY LAYER ==========
     
-    def create_file_entry_v1(self, file_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create file entry in drive (legacy method)"""
-        url = f"{self.drive_api_url}/files"
+    def move_item(self, item_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """WebDAV compatibility: Move file or folder"""
+        # Try as file first
+        try:
+            return self.move_file(item_uuid, destination_folder_uuid)
+        except:
+            # If file move fails, try as folder
+            return self.move_folder(item_uuid, destination_folder_uuid)
+
+    def rename_item(self, item_uuid: str, new_name: str) -> Dict[str, Any]:
+        """WebDAV compatibility: Rename file or folder"""
+        # Try as file first (with name/type parsing)
+        try:
+            if '.' in new_name:
+                name_parts = new_name.rsplit('.', 1)
+                plain_name = name_parts[0]
+                file_type = name_parts[1]
+                return self.rename_file(item_uuid, plain_name, file_type)
+            else:
+                return self.rename_file(item_uuid, new_name)
+        except:
+            # If file rename fails, try as folder
+            return self.rename_folder(item_uuid, new_name)
+
+    def trash_item(self, item_uuid: str) -> Dict[str, Any]:
+        """WebDAV compatibility: Trash file or folder"""
+        # Try as file first
+        try:
+            return self.trash_file(item_uuid)
+        except:
+            # If file trash fails, try as folder  
+            return self.trash_folder(item_uuid)
+
+    def update_file(self, file_uuid: str, new_file_id: str, new_size: int) -> Dict[str, Any]:
+        """WebDAV compatibility: Update file content"""
         payload = {
-            'name': file_data.get('name'),
-            'bucket': file_data.get('bucket'),
-            'fileId': file_data.get('fileId'),
-            'encryptVersion': file_data.get('encryptVersion'),
-            'folderUuid': file_data.get('folderId'), 
-            'size': file_data.get('size'),
-            'plainName': file_data.get('plainName'),
-            'type': file_data.get('type'),
+            'fileId': new_file_id,
+            'size': new_size
         }
-        return self.post(url, payload)
-
-    def get_upload_urls(self, bucket_id: str, file_size: int) -> Dict[str, Any]:
-        """Get upload URLs for file (legacy method)"""
-        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start"
-        data = {'uploads': [{'index': 0, 'size': file_size}]}
-        return self.post(url, data)
-
-    def get_download_urls(self, bucket_id: str, file_id: str) -> Dict[str, Any]:
-        """Get download URLs for file (legacy method)"""
-        url = f"{self.network_url}/buckets/{bucket_id}/files/{file_id}/info"
-        return self.get(url, headers={'x-api-version': '2'})
+        return self.replace_file(file_uuid, payload)
 
 
 # Global instance

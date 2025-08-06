@@ -236,20 +236,18 @@ class DriveService:
     # ========== TRASH OPERATIONS ==========
 
     def trash_file(self, file_uuid: str) -> Dict[str, Any]:
-        """Move file to trash - matches TrashService.trashItems()"""
+        """Move file to trash"""
         try:
-            # This would be the equivalent of the trash API call
-            # For now, we'll use the delete endpoint as a placeholder
-            response = self.api.delete_file(file_uuid)
-            return {'success': True, 'message': 'File moved to trash successfully', 'file': {'uuid': file_uuid}}
+            response = self.api.trash_file(file_uuid)  # Uses corrected bulk API
+            return {'success': True, 'message': 'File moved to trash successfully', 'file': {'uuid': file_uuid}, 'result': response}
         except Exception as e:
             raise Exception(f"Failed to trash file: {e}")
 
     def trash_folder(self, folder_uuid: str) -> Dict[str, Any]:
-        """Move folder to trash - matches TrashService.trashItems()"""
+        """Move folder to trash"""
         try:
-            response = self.api.delete_folder(folder_uuid)
-            return {'success': True, 'message': 'Folder moved to trash successfully', 'folder': {'uuid': folder_uuid}}
+            response = self.api.trash_folder(folder_uuid)  # Uses corrected bulk API
+            return {'success': True, 'message': 'Folder moved to trash successfully', 'folder': {'uuid': folder_uuid}, 'result': response}
         except Exception as e:
             raise Exception(f"Failed to trash folder: {e}")
 
@@ -294,30 +292,246 @@ class DriveService:
     # ========== MOVE AND RENAME OPERATIONS ==========
 
     def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """Move file to different folder - matches MoveFile command"""
-        # This would need a proper API endpoint for moving files
-        # For now, this is a placeholder structure
-        return {'success': True, 'message': f'File moved successfully to: {destination_folder_uuid}'}
+        """Move file to different folder"""
+        try:
+            response = self.api.move_file(file_uuid, destination_folder_uuid)
+            return {'success': True, 'message': f'File moved successfully to: {destination_folder_uuid}', 'result': response}
+        except Exception as e:
+            raise Exception(f"Failed to move file: {e}")
 
     def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """Move folder to different folder - matches MoveFolder command"""
-        # This would need a proper API endpoint for moving folders
-        # For now, this is a placeholder structure
-        return {'success': True, 'message': f'Folder moved successfully to: {destination_folder_uuid}'}
+        """Move folder to different folder"""
+        try:
+            response = self.api.move_folder(folder_uuid, destination_folder_uuid)
+            return {'success': True, 'message': f'Folder moved successfully to: {destination_folder_uuid}', 'result': response}
+        except Exception as e:
+            raise Exception(f"Failed to move folder: {e}")
 
     def rename_file(self, file_uuid: str, new_name: str) -> Dict[str, Any]:
-        """Rename file - matches RenameFile command"""
-        # This would need a proper API endpoint for renaming
-        # For now, this is a placeholder structure
-        return {'success': True, 'message': f'File renamed successfully to: {new_name}'}
+        """Rename file"""
+        try:
+            # Parse name and extension
+            if '.' in new_name:
+                name_parts = new_name.rsplit('.', 1)
+                plain_name = name_parts[0]
+                file_type = name_parts[1]
+            else:
+                plain_name = new_name
+                file_type = None
+                
+            response = self.api.rename_file(file_uuid, plain_name, file_type)
+            return {'success': True, 'message': f'File renamed successfully to: {new_name}', 'result': response}
+        except Exception as e:
+            raise Exception(f"Failed to rename file: {e}")
 
     def rename_folder(self, folder_uuid: str, new_name: str) -> Dict[str, Any]:
-        """Rename folder - matches RenameFolder command"""
-        # This would need a proper API endpoint for renaming
-        # For now, this is a placeholder structure
-        return {'success': True, 'message': f'Folder renamed successfully to: {new_name}'}
+        """Rename folder"""
+        try:
+            response = self.api.rename_folder(folder_uuid, new_name)
+            return {'success': True, 'message': f'Folder renamed successfully to: {new_name}', 'result': response}
+        except Exception as e:
+            raise Exception(f"Failed to rename folder: {e}")
+        
+    def move_item(self, item_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """Move file or folder to different folder (WebDAV required)"""
+        try:
+            # Try as file first
+            try:
+                return self.move_file(item_uuid, destination_folder_uuid)
+            except:
+                # If file move fails, try as folder
+                return self.move_folder(item_uuid, destination_folder_uuid)
+        except Exception as e:
+            raise Exception(f"Failed to move item {item_uuid}: {e}")
 
-    # ========== CORE OPERATIONS (your existing methods) ==========
+    def rename_item(self, item_uuid: str, new_name: str) -> Dict[str, Any]:
+        """Rename file or folder (WebDAV required)"""
+        try:
+            # Try as file first
+            try:
+                return self.rename_file(item_uuid, new_name)
+            except:
+                # If file rename fails, try as folder
+                return self.rename_folder(item_uuid, new_name)
+        except Exception as e:
+            raise Exception(f"Failed to rename item {item_uuid}: {e}")
+
+    def trash_item(self, item_uuid: str) -> Dict[str, Any]:
+        """Move file or folder to trash (WebDAV required)"""
+        try:
+            # Use the corrected API trash methods
+            try:
+                return self.api.trash_file(item_uuid)
+            except:
+                return self.api.trash_folder(item_uuid)
+        except Exception as e:
+            raise Exception(f"Failed to trash item {item_uuid}: {e}")
+
+    def update_file(self, file_uuid: str, local_path: str) -> Dict[str, Any]:
+        """Update existing file with new content (WebDAV required for PUT operations)"""
+        try:
+            # Get current file metadata
+            current_metadata = self.api.get_file_metadata(file_uuid)
+            folder_uuid = current_metadata.get('folderUuid', '')
+            plain_name = current_metadata.get('plainName', '')
+            file_type = current_metadata.get('type', '')
+            
+            # Upload new content and get new file ID
+            file_path = Path(local_path)
+            file_size = file_path.stat().st_size
+            
+            # Get credentials and upload new version
+            credentials = self.auth.get_auth_details()
+            user = credentials['user']
+            bucket_id = user['bucket']
+            mnemonic = user['mnemonic']
+            network_auth = self._get_network_auth(user)
+            
+            with open(file_path, 'rb') as f:
+                plaintext = f.read()
+            
+            # Encrypt and upload
+            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(plaintext, mnemonic, bucket_id)
+            start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
+            upload_details = start_response['uploads'][0]
+            upload_url = upload_details['url']
+            file_network_uuid = upload_details['uuid']
+            
+            self.api.upload_chunk(upload_url, encrypted_data)
+            
+            encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+            finish_payload = {
+                'index': file_index_hex,
+                'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
+            }
+            finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+            network_file_id = finish_response['id']
+            
+            # Replace file content using corrected API
+            replace_payload = {
+                'fileId': network_file_id,
+                'size': file_size
+            }
+            result = self.api.replace_file(file_uuid, replace_payload)
+            
+            return {
+                'success': True,
+                'message': f'File {plain_name} updated successfully',
+                'result': result
+            }
+            
+        except Exception as e:
+            raise Exception(f"Failed to update file {file_uuid}: {e}")
+
+    def copy_item(self, item_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """Copy file to different folder (WebDAV optional but useful)"""
+        try:
+            # Get file metadata
+            metadata = self.api.get_file_metadata(item_uuid)
+            
+            # Download file to temporary location
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                self.download_file(item_uuid, temp_path)
+                
+                # Upload to new location
+                plain_name = metadata.get('plainName', '')
+                file_type = metadata.get('type', '')
+                
+                # Create new file with upload_file_to_folder
+                result = self.upload_file_to_folder(temp_path, destination_folder_uuid, plain_name, file_type)
+                
+                return {
+                    'success': True,
+                    'message': f'File {plain_name} copied successfully',
+                    'result': result
+                }
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+                    
+        except Exception as e:
+            # If it's not a file, copying folders is complex - not implemented
+            raise Exception(f"Failed to copy item {item_uuid}: {e}")
+
+    def upload_file_to_folder(self, file_path_str: str, destination_folder_uuid: str, 
+                            custom_name: str = None, custom_extension: str = None):
+        """Upload file with custom name/extension to specific folder (WebDAV helper)"""
+        credentials = self.auth.get_auth_details()
+        user = credentials['user']
+        bucket_id = user['bucket']
+        mnemonic = user['mnemonic']
+        network_auth = self._get_network_auth(user)
+
+        file_path = Path(file_path_str)
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File not found at: {file_path}")
+
+        file_size = file_path.stat().st_size
+        if file_size > self.TWENTY_GIGABYTES:
+            raise ValueError("File is too large (must be less than 20 GB)")
+        
+        # Use custom name/extension if provided
+        file_name = custom_name or file_path.stem
+        file_extension = custom_extension or file_path.suffix.lstrip('.')
+        
+        print(f"📤 Uploading '{file_name}.{file_extension}' to folder...")
+        
+        with open(file_path, 'rb') as f:
+            plaintext = f.read()
+        
+        with tqdm(total=5, desc="Uploading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+            pbar.set_description("🔐 Encrypting with exact protocol")
+            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(plaintext, mnemonic, bucket_id)
+            pbar.update(1)
+
+            pbar.set_description("🚀 Initializing network upload")
+            start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
+            upload_details = start_response['uploads'][0]
+            upload_url = upload_details['url']
+            file_network_uuid = upload_details['uuid']
+            pbar.update(1)
+
+            pbar.set_description("☁️  Uploading encrypted data")
+            self.api.upload_chunk(upload_url, encrypted_data)
+            pbar.update(1)
+
+            pbar.set_description("✅ Finalizing network upload")
+            encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+            
+            finish_payload = {
+                'index': file_index_hex,
+                'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
+            }
+            finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+            network_file_id = finish_response['id']
+            pbar.update(1)
+
+            pbar.set_description("📋 Creating file metadata")
+            file_entry_payload = {
+                'folderUuid': destination_folder_uuid,
+                'plainName': file_name,
+                'type': file_extension,
+                'size': file_size,
+                'bucket': bucket_id,
+                'fileId': network_file_id,
+                'encryptVersion': 'Aes03',
+                'name': ''
+            }
+            created_file = self.api.create_file_entry(file_entry_payload)
+            pbar.update(1)
+        
+        print(f"✅ Success! File '{created_file.get('plainName')}' uploaded with UUID: {created_file.get('uuid')}")
+        return created_file
+
+    # ========== CORE OPERATIONS ==========
 
     def get_folder_content(self, folder_uuid: str) -> Dict[str, List[Dict[str, Any]]]:
         """Get folder contents"""
