@@ -298,7 +298,7 @@ python cli.py <command> --help            # Command-specific help
 
 ## 📄 License
 
-**MIT License** - See [LICENSE](LICENSE) file for details.
+**AGPL-3.0 license** - See [LICENSE](LICENSE) file for details.
 
 ---
 
