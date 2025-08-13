@@ -331,19 +331,19 @@ class InternxtDAVResource(DAVNonCollection):
         return self._upload_buffer
     
     def end_write(self, with_errors: bool):
-        """Called when writing is complete"""
-        print(f"🔍 WEBDAV: end_write(with_errors={with_errors}) for {self.path}")
-        
+        """Called when writing is complete, with corrected temp file handling for Windows."""
+        print(f"🏁 WEBDAV: end_write(with_errors={with_errors}) for {self.path}")
+
         if with_errors or not hasattr(self, '_upload_buffer'):
             print("❌ WEBDAV: Upload had errors or no buffer, aborting")
             if hasattr(self, '_upload_buffer'):
                 self._upload_buffer.cleanup()
             return
-        
+
         try:
             from services.drive import drive_service
             from services.auth import auth_service
-            
+
             # Get parent folder UUID
             path_parts = self.path.strip('/').split('/')
             if len(path_parts) == 1:
@@ -353,72 +353,65 @@ class InternxtDAVResource(DAVNonCollection):
                 parent_path = '/' + '/'.join(path_parts[:-1])
                 resolved = drive_service.resolve_path(parent_path)
                 parent_uuid = resolved['uuid']
-            
-            # Get file name
+
+            # Get file name and parse into name/extension
             file_name = path_parts[-1]
-            
-            # Parse name and extension
-            if '.' in file_name:
-                plain_name = file_name.rsplit('.', 1)[0]
-                file_type = file_name.rsplit('.', 1)[1]
-            else:
-                plain_name = file_name
-                file_type = ''
-            
-            # Check if we're updating an existing file
-            is_update = (hasattr(self, 'file_metadata') and 
-                        self.file_metadata.get('uuid') and 
-                        not self.file_metadata.get('uuid', '').startswith('pending-'))
-            
-            # Upload based on storage type
+            plain_name, file_type = os.path.splitext(file_name)
+            file_type = file_type.lstrip('.')
+
+            # Check if we're updating an existing file or creating a new one
+            is_update = (hasattr(self, 'file_metadata') and
+                         self.file_metadata.get('uuid') and
+                         not self.file_metadata.get('uuid', '').startswith('pending-'))
+
+            # Handle large files uploaded to disk
             if self._upload_buffer.using_disk:
-                # Large file - use disk path
                 file_path = self._upload_buffer.get_path()
                 print(f"📤 WEBDAV: Uploading large file ({self._upload_buffer.bytes_written} bytes) from disk")
-                
                 if is_update:
-                    file_uuid = self.file_metadata['uuid']
-                    print(f"📝 WEBDAV: Updating existing file {file_uuid}")
-                    result = drive_service.update_file(file_uuid, file_path)
+                    result = drive_service.update_file(self.file_metadata['uuid'], file_path)
                 else:
-                    print(f"📝 WEBDAV: Creating new file {plain_name}.{file_type}")
                     result = drive_service.upload_file_to_folder(file_path, parent_uuid, plain_name, file_type)
-                    
+            
+            # Handle small files uploaded from memory
             else:
-                # Small file - use memory
                 file_data = self._upload_buffer.get_data()
                 print(f"📤 WEBDAV: Uploading small file ({len(file_data)} bytes) from memory")
                 
-                # Still need temp file for drive service
-                with tempfile.NamedTemporaryFile(delete=True, suffix=f'.{file_type}' if file_type else '') as tmp_file:
+                # --- START OF THE FIX ---
+                # Create a temporary file, ensuring it's closed before use.
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_type}' if file_type else '')
+                tmp_file_path = tmp_file.name
+                
+                try:
+                    # Write data and, crucially, close the file to release the lock.
                     tmp_file.write(file_data)
-                    tmp_file.flush()
-                    
+                    tmp_file.close()
+
+                    # Now that the file is closed, we can safely pass its path to another function to read it.
                     if is_update:
-                        file_uuid = self.file_metadata['uuid']
-                        print(f"📝 WEBDAV: Updating existing file {file_uuid}")
-                        result = drive_service.update_file(file_uuid, tmp_file.name)
+                        result = drive_service.update_file(self.file_metadata['uuid'], tmp_file_path)
                     else:
-                        print(f"📝 WEBDAV: Creating new file {plain_name}.{file_type}")
-                        result = drive_service.upload_file_to_folder(tmp_file.name, parent_uuid, plain_name, file_type)
+                        result = drive_service.upload_file_to_folder(tmp_file_path, parent_uuid, plain_name, file_type)
+                finally:
+                    # Clean up the temporary file after the upload operation is complete.
+                    os.unlink(tmp_file_path)
+                # --- END OF THE FIX ---
             
             print(f"✅ WEBDAV: Upload successful!")
-            
-            # Update metadata
+
+            # Update resource metadata and clear parent cache
             if isinstance(result, dict):
                 self.file_metadata.update(result)
-            
-            # Clear parent folder cache
             if hasattr(self, 'parent') and hasattr(self.parent, '_content_cache'):
                 self.parent._content_cache = None
-                
+
         except Exception as e:
             print(f"❌ WEBDAV: Upload failed: {e}")
             import traceback
             traceback.print_exc()
             raise DAVError(HTTP_FORBIDDEN, f"Upload failed: {e}")
         finally:
-            # Clean up
             self._upload_buffer.cleanup()
     
     def delete(self):
