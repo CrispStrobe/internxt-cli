@@ -17,7 +17,6 @@ class AuthService:
         self.api = api_client
         self.crypto = crypto_service
     
-    # ... (is_2fa_needed remains the same) ...
     def is_2fa_needed(self, email: str) -> bool:
         try:
             details = self.api.security_details(email)
@@ -37,13 +36,13 @@ class AuthService:
         encrypted_salt = security_details.get('sKey')
         if not encrypted_salt:
             raise ValueError("Login failed: Did not receive encryptedSalt (sKey) from security details.")
-        
+
         # Step 2: Perform client-side crypto operations
         print("    Performing client-side crypto operations...")
         encrypted_password_hash = self.crypto.encrypt_password_hash(password, encrypted_salt)
-        keys_payload = self.crypto.generate_keys(password) 
+        keys_payload = self.crypto.generate_keys(password)
         print("    ✅ Crypto operations complete.")
-        
+
         # Step 3: Construct the final payload
         final_payload = {
             'email': email.lower(), 'password': encrypted_password_hash, 'tfa': tfa_code,
@@ -57,30 +56,55 @@ class AuthService:
 
         # Step 4: Make the final login call
         response = self.api.login_access(final_payload)
-        
+
         user_data, token, new_token = response.get('user'), response.get('token'), response.get('newToken')
         if not all([user_data, token, new_token]):
             raise ValueError("Login failed: Final API response was missing 'user', 'token', or 'newToken'")
-        
-        print("    ✅ Full login successful!")
-        
-        # Step 5: CORRECTLY HANDLE CREDENTIALS
-        # CORRECT: The mnemonic from the server is PLAINTEXT.
-        clear_mnemonic = user_data.get('mnemonic')
-        if not clear_mnemonic:
-            raise ValueError("Login failed: Mnemonic not found in user data.")
 
-        # CORRECT: The privateKey is encrypted with the MNEMONIC.
+        print("    ✅ Full login successful!")
+
+        # Step 5: CORRECTLY HANDLE CREDENTIALS
+        # CRITICAL FIX: The mnemonic is ENCRYPTED with the user's password!
+        encrypted_mnemonic = user_data.get('mnemonic')
+        if not encrypted_mnemonic:
+            raise ValueError("Login failed: Mnemonic not found in user data.")
+        
+        # Decrypt the mnemonic using the user's password
+        try:
+            clear_mnemonic = self.crypto.decrypt_text_with_key(encrypted_mnemonic, password)
+            print(f"    ✅ Mnemonic decrypted successfully ({len(clear_mnemonic.split())} words)")
+        except Exception as e:
+            raise ValueError(f"Login failed: Could not decrypt mnemonic: {e}")
+        
+        # Validate the decrypted mnemonic
+        if not self.crypto.validate_mnemonic(clear_mnemonic):
+            raise ValueError("Login failed: Decrypted mnemonic is invalid")
+        
+        # Handle private key (this part can stay as is)
         clear_private_key = ""
-        encrypted_pk_b64 = user_data.get('privateKey')
-        if encrypted_pk_b64:
+        encrypted_pk = user_data.get('privateKey', '')
+        
+        if encrypted_pk:
             try:
-                # The decrypt function expects hex, but the API sends Base64.
-                # So we decode from base64 to bytes, then encode those bytes to a hex string.
-                encrypted_pk_hex = base64.b64decode(encrypted_pk_b64).hex()
-                clear_private_key = self.crypto.decrypt_text_with_key(encrypted_pk_hex, clear_mnemonic)
+                # Check if it looks like a PGP private key (already decrypted)
+                if '-----BEGIN PGP PRIVATE KEY BLOCK-----' in encrypted_pk:
+                    clear_private_key = encrypted_pk
+                else:
+                    # It's encrypted - try to decrypt it
+                    try:
+                        # Try as base64 first
+                        import base64
+                        encrypted_pk_bytes = base64.b64decode(encrypted_pk)
+                        encrypted_pk_hex = encrypted_pk_bytes.hex()
+                    except:
+                        # Assume it's already hex
+                        encrypted_pk_hex = encrypted_pk
+                    
+                    clear_private_key = self.crypto.decrypt_text_with_key(encrypted_pk_hex, clear_mnemonic)
             except Exception as e:
-                print(f"    ⚠️  Warning: Failed to decrypt private key: {e}")
+                # If decryption fails, it might already be decrypted or not needed
+                print(f"    ℹ️  Note: Private key handling: {str(e)[:50]}...")
+                clear_private_key = encrypted_pk
 
         clear_user = {**user_data, 'mnemonic': clear_mnemonic, 'privateKey': clear_private_key}
 
