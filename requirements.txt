@@ -7,7 +7,8 @@ tqdm>=4.66.0
 
 # WebDAV server dependencies
 WsgiDAV>=4.3.0
-cheroot>=10.0.0
+waitress
+# cheroot>=10.0.0 # is broken in this case atm for it cannot handle gracefully when a client opens a connection to the server but closes it immediately without sending any data
 
 # Optional: for better SSL certificate handling
 pyOpenSSL>=23.0.0
