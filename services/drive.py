@@ -668,7 +668,7 @@ class DriveService:
         user = credentials['user']
         mnemonic = user['mnemonic']
         network_auth = self._get_network_auth(user)
-        
+
         print(f"📥 Downloading file UUID: {file_uuid} ...")
 
         with tqdm(total=5, desc="Downloading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
@@ -677,7 +677,7 @@ class DriveService:
             bucket_id = metadata['bucket']
             network_file_id = metadata['fileId']
             file_size = int(metadata['size'])
-            
+
             file_name = metadata.get('plainName', 'downloaded_file')
             file_type = metadata.get('type')
             if file_type:
@@ -694,13 +694,16 @@ class DriveService:
             encrypted_data = self.api.download_chunk(download_url)
             pbar.update(1)
 
-            pbar.set_description("🔓 Decrypting with exact protocol")
+            pbar.set_description("🔐 Decrypting with exact protocol")
             decrypted_data = self.crypto.decrypt_stream_internxt_protocol(
                 encrypted_data, mnemonic, bucket_id, file_index_hex
             )
-            
-            if len(decrypted_data) > file_size:
-                decrypted_data = decrypted_data[:file_size]
+
+            # ------------------------------------------------------------------
+            # Always trim the decrypted data to the exact file size from metadata.
+            # AES-CTR decryption can result in extra bytes that need to be discarded.
+            # ------------------------------------------------------------------
+            decrypted_data = decrypted_data[:file_size]
             pbar.update(1)
 
             destination_path = Path(destination_path_str)
@@ -711,7 +714,7 @@ class DriveService:
             with open(destination_path, 'wb') as f:
                 f.write(decrypted_data)
             pbar.update(1)
-        
+
         print(f"✅ Success! File downloaded and saved to '{destination_path}'")
         return str(destination_path)
 
