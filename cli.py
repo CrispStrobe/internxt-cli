@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 import glob
+import time
 
 # Try to import required packages
 try:
@@ -851,13 +852,69 @@ def delete_permanently_by_path(path: str, force: bool):
 # ========== WEBDAV SERVER COMMANDS ==========
 
 @cli.command('webdav-start')
-@click.option('--port', '-p', type=int, help='Port to run WebDAV server on (default: 8080)')
+@click.option('--port', type=int, help='Port to run WebDAV server on')
 @click.option('--background', '-b', is_flag=True, help='Run server in background')
-@click.option('--show-mount', '-m', is_flag=True, help='Show mount instructions after starting')
+@click.option('--show-mount', is_flag=True, help='Show mount instructions')
 def webdav_start(port: Optional[int], background: bool, show_mount: bool):
-    """Start WebDAV server to mount Internxt Drive as local filesystem"""
+    """Start WebDAV server to mount Internxt Drive as a local drive"""
     try:
-        result = webdav_server.start(port=port, background=background)
+        # Handle background mode by spawning a separate process
+        if background:
+            import subprocess
+            
+            # Build command to run in background
+            cmd = [sys.executable, __file__, 'webdav-start']
+            if port:
+                cmd.extend(['--port', str(port)])
+            # Don't pass --background to avoid infinite recursion
+            
+            # Check if already running
+            status = webdav_server.status()
+            if status['running']:
+                click.echo(f"❌ WebDAV server is already running")
+                click.echo(f"🌐 Server URL: {status['url']}")
+                sys.exit(1)
+            
+            # Spawn background process
+            click.echo("🚀 Starting WebDAV server in background...")
+            
+            # Redirect output to log file
+            log_dir = config_service.internxt_cli_logs_dir
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / 'webdav.log'
+            
+            with open(log_file, 'w') as log:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True  # Detach from parent
+                )
+                
+                # Save PID
+                config_service.save_webdav_pid(process.pid)
+                
+                # Wait a moment to ensure it starts
+                time.sleep(2)
+                
+                # Check if it's actually running
+                status = webdav_server.status()
+                if status.get('running'):
+                    click.echo(f"✅ WebDAV server started in background (PID: {process.pid})")
+                    click.echo(f"🌐 Server URL: http://localhost:{port or 3005}/")
+                    click.echo(f"👤 Username: internxt")
+                    click.echo(f"🔑 Password: internxt-webdav")
+                    click.echo(f"\n📋 Logs: {log_file}")
+                    click.echo(f"💡 Use 'python cli.py webdav-stop' to stop the server")
+                    click.echo(f"💡 Use 'python cli.py webdav-status' to check status")
+                else:
+                    click.echo(f"❌ Server failed to start. Check logs: {log_file}")
+                    sys.exit(1)
+            
+            return
+        
+        # Foreground mode - run directly
+        result = webdav_server.start(port=port, background=False)
         
         if result['success']:
             click.echo(f"✅ {result['message']}")
@@ -865,7 +922,7 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool):
             click.echo(f"👤 Username: internxt")
             click.echo(f"🔑 Password: internxt-webdav")
             
-            if show_mount or not background:
+            if show_mount:
                 click.echo(f"\n💡 Mount Instructions:")
                 instructions = webdav_server.get_mount_instructions()
                 
@@ -885,20 +942,21 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool):
                         click.echo(f"\n{platform_name.upper()}:")
                         click.echo(instruction)
             
-            if not background:
-                click.echo(f"\n🔄 Server running... Press Ctrl+C to stop")
-                # Server will run in main thread
-            else:
-                click.echo(f"\n💡 Use 'python cli.py webdav-stop' to stop the server")
-                click.echo(f"💡 Use 'python cli.py webdav-status' to check status")
+            click.echo(f"\n🔄 Server running... Press Ctrl+C to stop")
+            # Server will run in main thread - keep it alive
+            while True:
+                time.sleep(1)
         else:
             click.echo(f"❌ {result['message']}", err=True)
             sys.exit(1)
             
     except KeyboardInterrupt:
         click.echo(f"\n🛑 WebDAV server stopped by user")
+        config_service.clear_webdav_pid()
     except Exception as e:
         click.echo(f"❌ Error starting WebDAV server: {e}", err=True)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

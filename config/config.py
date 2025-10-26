@@ -35,6 +35,7 @@ class ConfigService:
         self.drive_sqlite_file = self.internxt_cli_data_dir / 'internxt-cli-drive.sqlite'
         self.webdav_ssl_certs_dir = self.internxt_cli_data_dir / 'certs'
         self.webdav_configs_file = self.internxt_cli_data_dir / 'config.webdav.inxt'
+        self.webdav_pid_file = self.internxt_cli_data_dir / 'webdav.pid'
         
         # EXACT match to TypeScript WebDAV constants:
         # static readonly WEBDAV_LOCAL_URL = 'webdav.local.internxt.com';
@@ -57,6 +58,28 @@ class ConfigService:
         }
 
         self._ensure_internxt_cli_data_dir_exists()
+
+    def save_webdav_pid(self, pid: int) -> None:
+        """Save WebDAV server PID"""
+        self._ensure_internxt_cli_data_dir_exists()
+        with open(self.webdav_pid_file, 'w') as f:
+            f.write(str(pid))
+
+    def read_webdav_pid(self) -> Optional[int]:
+        """Read WebDAV server PID"""
+        try:
+            with open(self.webdav_pid_file, 'r') as f:
+                return int(f.read().strip())
+        except Exception:
+            return None
+
+    def clear_webdav_pid(self) -> None:
+        """Clear WebDAV server PID"""
+        try:
+            if self.webdav_pid_file.exists():
+                self.webdav_pid_file.unlink()
+        except Exception:
+            pass
 
     def get(self, key: str) -> str:
         """

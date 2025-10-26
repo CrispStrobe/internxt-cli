@@ -163,21 +163,11 @@ class WebDAVServer:
             print(f"🔧 Setting up server on {self.config['host']}:{self.config['port']}...")
             print(f"🔧 Using WSGI server: {WSGI_SERVER}")
             
-            # Start server
-            if background:
-                self.server_thread = threading.Thread(
-                    target=self._run_server_thread,
-                    daemon=True
-                )
-                self.server_thread.start()
-                
-                # Wait for server to start
-                time.sleep(2)
-                
-                if not self.is_running:
-                    return {'success': False, 'message': 'Failed to start server in background'}
-            else:
-                self._run_server_thread()
+            # Setup signal handlers (we're always in main thread now)
+            self._setup_signal_handlers()
+            
+            # Start server in main thread
+            self._run_server_thread()
             
             return {
                 'success': True,
@@ -196,6 +186,18 @@ class WebDAVServer:
                 'success': False,
                 'message': f'Failed to start WebDAV server: {e}'
             }
+    
+    def _setup_signal_handlers(self):
+        """Setup signal handlers (only works in main thread)"""
+        def signal_handler(signum, frame):
+            print(f"\n🛑 Received signal {signum}, stopping WebDAV server...")
+            self.is_stopping = True
+            self.is_running = False
+            config_service.clear_webdav_pid()
+            os._exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
     
     def _run_server_thread(self):
         """Run server in thread"""
@@ -224,16 +226,6 @@ class WebDAVServer:
                 print()
             
             print("Press Ctrl+C to stop the server")
-            
-            # Signal handling
-            def signal_handler(signum, frame):
-                print(f"\n🛑 Received signal {signum}, stopping WebDAV server...")
-                self.is_stopping = True
-                self.is_running = False
-                os._exit(0)
-            
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
             
             # Start the appropriate server
             print("🔄 Starting server...")
@@ -268,17 +260,48 @@ class WebDAVServer:
         except Exception as e:
             if not self.is_stopping:
                 print(f"❌ WebDAV server error: {e}")
-                if "NoneType" not in str(e):
+                if "NoneType" not in str(e) and "signal" not in str(e):
                     import traceback
                     traceback.print_exc()
         finally:
             self.is_running = False
+            config_service.clear_webdav_pid()
             print("🛑 WebDAV server stopped")
     
     def stop(self) -> Dict[str, Any]:
         """Stop WebDAV server"""
         print("🛑 Stopping WebDAV server...")
         self.is_stopping = True
+        
+        # Check for PID file from background process
+        saved_pid = config_service.read_webdav_pid()
+        if saved_pid:
+            try:
+                # Try to kill the background process
+                import psutil
+                process = psutil.Process(saved_pid)
+                process.terminate()
+                process.wait(timeout=5)
+                config_service.clear_webdav_pid()
+                print("✅ Background WebDAV server stopped successfully")
+                return {
+                    'success': True,
+                    'message': 'Background WebDAV server stopped successfully'
+                }
+            except ImportError:
+                print("⚠️  psutil not installed. Install with: pip install psutil")
+                print(f"   To stop manually: kill {saved_pid}")
+                return {
+                    'success': False,
+                    'message': f'Cannot stop background server. Run: kill {saved_pid}'
+                }
+            except Exception as e:
+                print(f"⚠️  Could not stop background process: {e}")
+                config_service.clear_webdav_pid()
+                return {
+                    'success': False,
+                    'message': f'Error stopping background server: {e}'
+                }
         
         if not self.is_running:
             return {
@@ -304,6 +327,7 @@ class WebDAVServer:
                 else:
                     self.server_thread.join(timeout=2)
             
+            config_service.clear_webdav_pid()
             print("✅ WebDAV server stopped successfully")
             
             return {
@@ -313,6 +337,7 @@ class WebDAVServer:
             
         except Exception as e:
             print(f"❌ Error during server shutdown: {e}")
+            config_service.clear_webdav_pid()
             return {
                 'success': False,
                 'message': f'Error stopping WebDAV server: {e}'
@@ -323,9 +348,43 @@ class WebDAVServer:
         if self.is_running:
             self.is_stopping = True
             self.is_running = False
+            config_service.clear_webdav_pid()
     
     def status(self) -> Dict[str, Any]:
         """Get server status"""
+        # Check for background process first
+        saved_pid = config_service.read_webdav_pid()
+        if saved_pid:
+            try:
+                import psutil
+                process = psutil.Process(saved_pid)
+                if process.is_running():
+                    return {
+                        'running': True,
+                        'url': self._get_server_url(),
+                        'port': self.config['port'],
+                        'protocol': 'http',
+                        'host': self.config['host'],
+                        'server': WSGI_SERVER,
+                        'pid': saved_pid,
+                        'mode': 'background'
+                    }
+            except ImportError:
+                # psutil not available, assume running if PID exists
+                return {
+                    'running': True,
+                    'url': self._get_server_url(),
+                    'port': self.config['port'],
+                    'protocol': 'http',
+                    'host': self.config['host'],
+                    'server': WSGI_SERVER,
+                    'pid': saved_pid,
+                    'mode': 'background (unverified - install psutil to verify)'
+                }
+            except Exception:
+                # Process doesn't exist, clear stale PID
+                config_service.clear_webdav_pid()
+        
         if self.is_running:
             return {
                 'running': True,
@@ -333,7 +392,8 @@ class WebDAVServer:
                 'port': self.config['port'],
                 'protocol': 'http',
                 'host': self.config['host'],
-                'server': WSGI_SERVER
+                'server': WSGI_SERVER,
+                'mode': 'foreground'
             }
         else:
             return {
@@ -393,7 +453,8 @@ Password: internxt-webdav
     
     def test_connection(self) -> Dict[str, Any]:
         """Test WebDAV server connection"""
-        if not self.is_running:
+        status = self.status()
+        if not status.get('running'):
             return {
                 'success': False,
                 'message': 'WebDAV server is not running'
