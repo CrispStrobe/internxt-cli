@@ -13,6 +13,7 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
+import glob
 
 # Try to import required packages
 try:
@@ -287,16 +288,216 @@ def mkdir(name: str, parent_folder_id: Optional[str]):
 
 
 @cli.command()
-@click.argument('filepath', type=click.Path(exists=True, dir_okay=False, resolve_path=True))
-@click.option('--destination', '-d', help='Destination folder UUID (defaults to root folder)')
-def upload(filepath, destination):
-    """Encrypts and uploads a file to your Internxt Drive"""
-    try:
-        drive_service.upload_file(filepath, destination)
-    except Exception as e:
-        click.echo(f"❌ Error uploading file: {e}", err=True)
+@click.argument('sources', nargs=-1, type=click.Path(exists=True, resolve_path=True, readable=True, dir_okay=True))
+@click.option('--target', '-t', 'target_path', default='/', help='Destination path on Internxt Drive (default: /)')
+@click.option('--recursive', '-r', is_flag=True, help='Upload directories recursively')
+@click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='skip', help='Action if target exists (overwrite/skip)')
+def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: str):
+    """
+    Encrypts and uploads local files/folders to a remote path.
+
+    SOURCES... can be one or more local file or directory paths. Wildcards (*) are supported.
+    Use --target to specify the destination folder (defaults to root /).
+    """
+    if not sources:
+        click.echo("❌ No source files or directories specified.", err=True)
         sys.exit(1)
 
+    try:
+        credentials = auth_service.get_auth_details() # Ensures logged in
+        click.echo(f"🎯 Preparing upload to remote path: {target_path}")
+
+        # --- Resolve or Create Target Folder ---
+        target_folder_uuid = None
+        target_folder_path_str = "/" # Default to root if path resolution fails somehow
+        try:
+            target_folder_info = drive_service.resolve_path(target_path)
+            if target_folder_info['type'] != 'folder':
+                click.echo(f"❌ Target path '{target_path}' exists but is not a folder.", err=True)
+                sys.exit(1)
+            target_folder_uuid = target_folder_info['uuid']
+            target_folder_path_str = target_folder_info['path'] # Use resolved path
+            click.echo(f"✅ Target folder exists: '{target_folder_path_str}' (UUID: {target_folder_uuid[:8]}...)")
+        except FileNotFoundError:
+            click.echo(f"⏳ Target path '{target_path}' not found. Attempting to create...")
+            try:
+                # create_folder_recursive ensures the full path exists
+                created_folder = drive_service.create_folder_recursive(target_path)
+                target_folder_uuid = created_folder['uuid']
+                # Re-resolve to get the canonical path string
+                target_folder_info = drive_service.resolve_path(target_path)
+                target_folder_path_str = target_folder_info['path']
+                click.echo(f"✅ Created target folder '{target_folder_path_str}' (UUID: {target_folder_uuid[:8]}...)")
+            except Exception as create_err:
+                click.echo(f"❌ Failed to create target folder '{target_path}': {create_err}", err=True)
+                sys.exit(1)
+        except Exception as resolve_err:
+            click.echo(f"❌ Error resolving target path '{target_path}': {resolve_err}", err=True)
+            sys.exit(1)
+
+        if not target_folder_uuid:
+             click.echo("❌ Could not determine target folder UUID. Aborting.", err=True)
+             sys.exit(1)
+
+        # --- Process Sources ---
+        items_to_process = [] # Store tuples: (local_path_obj, base_source_dir_obj | None)
+        click.echo("🔍 Expanding source paths...")
+        for source_arg in sources:
+            source_path_str = str(Path(source_arg).resolve()) # Resolve potential relative paths/dots
+
+            # Use glob with recursive=True to handle **/ patterns correctly if -r is given
+            matches = glob.glob(source_path_str, recursive=recursive)
+
+            if not matches:
+                click.echo(f"⚠️ Source not found or matched nothing: {source_arg}", err=True)
+                continue
+
+            # Determine the base directory for relative path calculation
+            # If the arg has wildcards, the base is the part before the first wildcard
+            base_dir_str = source_path_str
+            if "*" in source_arg or "?" in source_arg or "[" in source_arg:
+                 # Find the directory part before the first wildcard pattern
+                 path_parts = Path(source_arg).parts
+                 non_wildcard_parts = []
+                 for part in path_parts:
+                      if "*" in part or "?" in part or "[" in part:
+                           break
+                      non_wildcard_parts.append(part)
+                 # If wildcards are in the first part, base is cwd, otherwise join parts
+                 if non_wildcard_parts:
+                      base_dir_str = str(Path(*non_wildcard_parts))
+                      # If the source arg itself points to a directory, use it directly
+                      if Path(source_arg).is_dir() and not ("*" in source_arg or "?" in source_arg or "[" in source_arg):
+                           base_dir_str = str(Path(source_arg))
+                 else:
+                      base_dir_str = os.getcwd() # Wildcard in the first element, relative to cwd
+                 # Ensure base_dir is absolute if source_arg was absolute
+                 if Path(source_arg).is_absolute():
+                      base_dir_path = Path(base_dir_str)
+                      if not base_dir_path.is_absolute():
+                           base_dir_path = Path.cwd() / base_dir_path
+                      base_dir_str = str(base_dir_path.resolve())
+
+            base_source_dir = Path(base_dir_str)
+            if base_source_dir.is_file():
+                 base_source_dir = base_source_dir.parent # Base is the parent dir if arg is a file
+
+
+            for match_str in matches:
+                match_path = Path(match_str).resolve()
+                # If the match itself is a directory, use it as the base_source_dir for its contents
+                current_base = base_source_dir if not match_path.is_dir() else match_path.parent
+                items_to_process.append((match_path, current_base))
+
+
+        if not items_to_process:
+            click.echo("❌ No valid source files or directories found after expansion.", err=True)
+            sys.exit(1)
+
+        click.echo(f"📦 Found {len(items_to_process)} items/directories to process.")
+
+        # --- Upload Loop ---
+        success_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        processed_dirs = set() # Avoid processing contents of a dir multiple times if matched by wildcard
+
+        for local_path, base_source_dir in items_to_process:
+            try:
+                click.echo("-" * 40)
+                click.echo(f"Processing: {local_path}")
+
+                if local_path.is_file():
+                    # It's a file, upload it directly to the target folder
+                    upload_result = drive_service.upload_single_item_with_conflict_handling(
+                        local_path,
+                        target_folder_path_str, # Parent remote path
+                        target_folder_uuid,     # Parent remote UUID
+                        on_conflict,
+                        remote_filename=local_path.name # Use the file's own name
+                    )
+                    if upload_result == "uploaded": success_count += 1
+                    elif upload_result == "skipped": skipped_count += 1
+                    else: error_count += 1
+
+                elif local_path.is_dir():
+                    if local_path in processed_dirs:
+                        click.echo(f"  -> Skipping already processed directory: {local_path}")
+                        continue
+
+                    if not recursive:
+                        click.echo(f"⚠️ Skipping directory (use -r to upload recursively): {local_path}")
+                        skipped_count += 1
+                        continue
+
+                    # It's a directory, upload its contents recursively
+                    click.echo(f"📂 Processing directory recursively: {local_path}")
+                    processed_dirs.add(local_path) # Mark as processed
+
+                    # Define the base remote path for this directory's contents
+                    dir_remote_base_path = Path(target_folder_path_str) / local_path.name
+
+                    for item in local_path.rglob('*'):
+                        if item.is_file():
+                            relative_path = item.relative_to(local_path)
+                            # Construct remote target path for this specific file
+                            item_target_parent_path = dir_remote_base_path / relative_path.parent
+                            item_target_parent_path_str = str(item_target_parent_path).replace('\\', '/')
+                            if not item_target_parent_path_str.startswith('/'):
+                                item_target_parent_path_str = '/' + item_target_parent_path_str
+
+                            click.echo(f"  -> Found file: {item} (relative: {relative_path})")
+                            click.echo(f"     Target parent path: {item_target_parent_path_str}")
+
+                            # Ensure parent remote folder exists
+                            parent_folder_uuid = None
+                            try:
+                                parent_folder = drive_service.create_folder_recursive(item_target_parent_path_str)
+                                parent_folder_uuid = parent_folder['uuid']
+                                click.echo(f"     Ensured parent folder exists (UUID: {parent_folder_uuid[:8]}...)")
+                            except Exception as create_err:
+                                click.echo(f"     ❌ Error ensuring parent folder {item_target_parent_path_str}: {create_err}", err=True)
+                                error_count += 1
+                                continue # Skip this file
+
+                            # Upload the file itself into the correct parent folder
+                            upload_result = drive_service.upload_single_item_with_conflict_handling(
+                                item,
+                                item_target_parent_path_str, # Target path is the parent folder
+                                parent_folder_uuid,          # Target UUID is the parent folder
+                                on_conflict,
+                                remote_filename=item.name    # Specify the filename explicitly
+                            )
+                            if upload_result == "uploaded": success_count += 1
+                            elif upload_result == "skipped": skipped_count += 1
+                            else: error_count += 1 # Error occurred within the function
+                        # No need to explicitly handle directories here, rglob finds files,
+                        # and create_folder_recursive handles the structure.
+
+                else:
+                    click.echo(f"⚠️ Skipping unknown item type: {local_path}", err=True)
+                    skipped_count += 1
+
+            except Exception as e:
+                click.echo(f"❌ Unexpected error processing {local_path}: {e}", err=True)
+                import traceback
+                traceback.print_exc() # Show full traceback for unexpected errors
+                error_count += 1
+
+    finally: # Ensure summary is always printed
+        click.echo("=" * 40)
+        click.echo("📊 Upload Summary:")
+        click.echo(f"  ✅ Uploaded: {success_count}")
+        click.echo(f"  ⏭️ Skipped:  {skipped_count}")
+        click.echo(f"  ❌ Errors:   {error_count}")
+        click.echo("=" * 40)
+
+        if error_count > 0:
+            sys.exit(1) # Exit with error code if any errors occurred
+
+
+    # No sys.exit(1) needed here if we handle it in the finally block based on error_count
 
 @cli.command()
 @click.argument('file_uuid')
