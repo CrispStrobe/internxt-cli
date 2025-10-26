@@ -287,9 +287,8 @@ def mkdir(name: str, parent_folder_id: Optional[str]):
         error_msg = str(e)
         click.echo(f"❌ Error creating folder: {error_msg}", err=True)
 
-
 @cli.command()
-@click.argument('sources', nargs=-1, type=click.Path(exists=True, resolve_path=True, readable=True, dir_okay=True))
+@click.argument('sources', nargs=-1, type=str)  # Changed: removed resolve_path=True, just take strings
 @click.option('--target', '-t', 'target_path', default='/', help='Destination path on Internxt Drive (default: /)')
 @click.option('--recursive', '-r', is_flag=True, help='Upload directories recursively')
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='skip', help='Action if target exists (overwrite/skip)')
@@ -298,7 +297,11 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
     Encrypts and uploads local files/folders to a remote path.
 
     SOURCES... can be one or more local file or directory paths. Wildcards (*) are supported.
-    Use --target to specify the destination folder (defaults to root /).
+    TARGET_PATH is the destination path on your Internxt Drive (e.g., "/Documents/Backup").
+    
+    Trailing slash behavior (like rsync):
+      source/  → uploads contents to target (no new folder)
+      source   → creates 'source' folder in target
     """
     if not sources:
         click.echo("❌ No source files or directories specified.", err=True)
@@ -306,7 +309,7 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
 
     try:
         credentials = auth_service.get_auth_details() # Ensures logged in
-        click.echo(f"🎯 Preparing upload to remote path: {target_path}")
+        click.echo(f"🎯 Preparing the upload to remote path: {target_path}")
 
         # --- Resolve or Create Target Folder ---
         target_folder_uuid = None
@@ -341,10 +344,22 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
              sys.exit(1)
 
         # --- Process Sources ---
-        items_to_process = [] # Store tuples: (local_path_obj, base_source_dir_obj | None)
+        items_to_process = [] # Store tuples: (local_path_obj, base_source_dir_obj | None, copy_contents_only)
         click.echo("🔍 Expanding source paths...")
         for source_arg in sources:
-            source_path_str = str(Path(source_arg).resolve()) # Resolve potential relative paths/dots
+            # IMPORTANT: Detect trailing slash BEFORE path resolution
+            has_trailing_slash = source_arg.rstrip().endswith('/') or source_arg.rstrip().endswith(os.sep)
+            
+            # Now resolve the path (this will strip trailing slash)
+            source_path = Path(source_arg)
+            
+            # Validate the source exists
+            if not source_path.exists():
+                click.echo(f"⚠️ Source not found: {source_arg}", err=True)
+                continue
+            
+            source_path_resolved = source_path.resolve()
+            source_path_str = str(source_path_resolved)
 
             # Use glob with recursive=True to handle **/ patterns correctly if -r is given
             matches = glob.glob(source_path_str, recursive=recursive)
@@ -388,7 +403,10 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                 match_path = Path(match_str).resolve()
                 # If the match itself is a directory, use it as the base_source_dir for its contents
                 current_base = base_source_dir if not match_path.is_dir() else match_path.parent
-                items_to_process.append((match_path, current_base))
+                
+                # For directories, pass the trailing slash flag
+                copy_contents_only = has_trailing_slash if match_path.is_dir() else False
+                items_to_process.append((match_path, current_base, copy_contents_only))
 
 
         if not items_to_process:
@@ -404,7 +422,7 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
 
         processed_dirs = set() # Avoid processing contents of a dir multiple times if matched by wildcard
 
-        for local_path, base_source_dir in items_to_process:
+        for local_path, base_source_dir, copy_contents_only in items_to_process:
             try:
                 click.echo("-" * 40)
                 click.echo(f"Processing: {local_path}")
@@ -437,7 +455,15 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                     processed_dirs.add(local_path) # Mark as processed
 
                     # Define the base remote path for this directory's contents
-                    dir_remote_base_path = Path(target_folder_path_str) / local_path.name
+                    # Check if source had trailing slash (copy contents only)
+                    if copy_contents_only:
+                        # Upload contents directly to target (no new folder)
+                        click.echo(f"  ✨ Copying contents directly to target (trailing slash detected)")
+                        dir_remote_base_path = Path(target_folder_path_str)
+                    else:
+                        # Create folder with directory name in target
+                        click.echo(f"  📁 Creating folder '{local_path.name}' in target")
+                        dir_remote_base_path = Path(target_folder_path_str) / local_path.name
 
                     for item in local_path.rglob('*'):
                         if item.is_file():
@@ -481,12 +507,11 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                     skipped_count += 1
 
             except Exception as e:
-                click.echo(f"❌ Unexpected error processing {local_path}: {e}", err=True)
-                import traceback
-                traceback.print_exc() # Show full traceback for unexpected errors
+                click.echo(f"❌ Error processing {local_path}: {e}", err=True)
                 error_count += 1
+                continue
 
-    finally: # Ensure summary is always printed
+        # --- Summary ---
         click.echo("=" * 40)
         click.echo("📊 Upload Summary:")
         click.echo(f"  ✅ Uploaded: {success_count}")
@@ -494,11 +519,13 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
         click.echo(f"  ❌ Errors:   {error_count}")
         click.echo("=" * 40)
 
-        if error_count > 0:
-            sys.exit(1) # Exit with error code if any errors occurred
+    except Exception as e:
+        click.echo(f"❌ Upload failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
-    # No sys.exit(1) needed here if we handle it in the finally block based on error_count
 
 @cli.command()
 @click.argument('file_uuid')
