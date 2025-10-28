@@ -126,65 +126,92 @@ class WebDAVServer:
         
         return WsgiDAVApp(config)
     
-    def start(self, port: Optional[int] = None, background: bool = False) -> Dict[str, Any]:
-        """Start WebDAV server"""
-        if self.is_running:
-            return {
-                'success': False,
-                'message': 'WebDAV server is already running',
-                'url': self._get_server_url()
-            }
+    def start(self, port: Optional[int] = None, background: bool = False, 
+            preserve_timestamps: bool = True) -> Dict[str, Any]:
+        """
+        Start the WebDAV server
         
+        Args:
+            port: Port to run on (default from config)
+            background: Run in background mode
+            preserve_timestamps: Preserve file timestamps (default: True)
+        
+        Returns:
+            Dict with success status, message, and URL
+        """
         try:
-            # Verify authentication
-            auth_service.get_auth_details()
-            print("✅ Authentication verified")
-        except Exception as e:
-            return {
-                'success': False,
-                'message': f'Not logged in: {e}'
-            }
-        
-        # Determine port
-        target_port = int(port or self.config['port'])
-        if not self._check_port_available(target_port):
-            try:
-                target_port = self._find_available_port(target_port)
-                print(f"   Port {port or self.config['port']} busy, using {target_port}")
-            except RuntimeError as e:
-                return {'success': False, 'message': str(e)}
-        
-        self.config['port'] = target_port
-        
-        try:
-            print(f"🔧 Creating WebDAV application...")
-            self.app = self._create_wsgidav_app()
+            from wsgidav.wsgidav_app import WsgiDAVApp
+            from cheroot import wsgi
+            from services.webdav_provider import InternxtDAVProvider
             
-            print(f"🔧 Setting up server on {self.config['host']}:{self.config['port']}...")
-            print(f"🔧 Using WSGI server: {WSGI_SERVER}")
+            # Get configuration
+            webdav_config = config_service.read_webdav_config()
             
-            # Setup signal handlers (we're always in main thread now)
-            self._setup_signal_handlers()
+            if port is None:
+                port = int(webdav_config.get('port', 8080))
             
-            # Start server in main thread
-            self._run_server_thread()
+            protocol = webdav_config.get('protocol', 'http')
             
-            return {
-                'success': True,
-                'message': f'WebDAV server started on {self._get_server_url()}',
-                'url': self._get_server_url(),
-                'port': self.config['port'],
-                'protocol': 'http'
+            # Create provider with timestamp preservation setting
+            provider = InternxtDAVProvider(preserve_timestamps=preserve_timestamps)  # NEW: Pass flag
+            
+            # Configure WsgiDAV
+            config = {
+                "host": "0.0.0.0",
+                "port": port,
+                "provider_mapping": {"/": provider},
+                "simple_dc": {"user_mapping": {"*": {"internxt": {"password": "internxt-webdav"}}}},
+                "verbose": 1,
+                "enable_loggers": [],
+                "logging": {
+                    "enable": True,
+                    "enable_loggers": ["wsgidav"],
+                },
             }
             
+            # Create WSGI application
+            app = WsgiDAVApp(config)
+            
+            # Start server
+            server_url = f"{protocol}://localhost:{port}/"
+            
+            if background:
+                # Background mode handled by CLI command
+                pass
+            
+            # Create and start server
+            server = wsgi.Server(
+                bind_addr=("0.0.0.0", port),
+                wsgi_app=app,
+            )
+            
+            print(f"✅ WebDAV server started successfully")
+            print(f"🌐 URL: {server_url}")
+            print(f"👤 Username: internxt")
+            print(f"🔑 Password: internxt-webdav")
+            print(f"🕐 Timestamp Preservation: {'Enabled' if preserve_timestamps else 'Disabled'}")
+            
+            # Store server instance
+            self._server = server
+            
+            # Start serving
+            server.start()
+            
+            return {
+                "success": True,
+                "message": "WebDAV server started",
+                "url": server_url,
+                "preserve_timestamps": preserve_timestamps
+            }
+            
         except Exception as e:
+            print(f"❌ Error starting WebDAV server: {e}")
             import traceback
-            error_details = traceback.format_exc()
-            print(f"❌ Detailed error: {error_details}")
-            
+            traceback.print_exc()
             return {
-                'success': False,
-                'message': f'Failed to start WebDAV server: {e}'
+                "success": False,
+                "message": f"Failed to start server: {e}",
+                "url": None
             }
     
     def _setup_signal_handlers(self):

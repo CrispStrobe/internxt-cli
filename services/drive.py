@@ -451,10 +451,14 @@ class DriveService:
             return None
 
     def copy_item(self, item_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """Copy file to different folder (WebDAV optional but useful)"""
+        """Copy file to different folder preserving timestamps"""
         try:
             # Get file metadata
             metadata = self.api.get_file_metadata(item_uuid)
+            
+            # Extract timestamps - try both field name variations
+            creation_time = metadata.get('creationTime') or metadata.get('createdAt')
+            modification_time = metadata.get('modificationTime') or metadata.get('updatedAt')
             
             # Download file to temporary location
             import tempfile
@@ -464,29 +468,42 @@ class DriveService:
             try:
                 self.download_file(item_uuid, temp_path)
                 
-                # Upload to new location
+                # Upload to new location WITH timestamps
                 plain_name = metadata.get('plainName', '')
                 file_type = metadata.get('type', '')
                 
-                # Create new file with upload_file_to_folder
-                result = self.upload_file_to_folder(temp_path, destination_folder_uuid, plain_name, file_type)
+                print(f"     📋 Copying with timestamp preservation:")
+                if creation_time:
+                    print(f"        Original creation: {creation_time}")
+                if modification_time:
+                    print(f"        Original modification: {modification_time}")
+                
+                # Create new file with upload_file_to_folder, passing timestamps
+                result = self.upload_file_to_folder(
+                    temp_path, 
+                    destination_folder_uuid, 
+                    plain_name, 
+                    file_type,
+                    creation_time=creation_time,
+                    modification_time=modification_time
+                )
                 
                 return {
                     'success': True,
                     'message': f'File {plain_name} copied successfully',
-                    'result': result
+                    'result': result,
+                    'timestamps_preserved': bool(creation_time or modification_time)
                 }
                 
             finally:
-                # Clean up temporary file
+                # Clean up temp file
                 try:
                     os.unlink(temp_path)
-                except OSError:
+                except:
                     pass
                     
         except Exception as e:
-            # If it's not a file, copying folders is complex - not implemented
-            raise Exception(f"Failed to copy item {item_uuid}: {e}")
+            raise Exception(f"Copy failed: {e}")
         
     def create_upload_checkpoint(self, file_path: Path, target_uuid: str) -> str:
         """
@@ -541,8 +558,9 @@ class DriveService:
         return filename
 
     def upload_file_to_folder(self, file_path_str: str, destination_folder_uuid: str, 
-                            custom_name: str = None, custom_extension: str = None):
-        """Upload file with custom name/extension to specific folder"""
+                            custom_name: str = None, custom_extension: str = None,
+                            creation_time: str = None, modification_time: str = None):
+        """Upload file with custom name/extension and optional timestamps to specific folder"""
         credentials = self.auth.get_auth_details()
         user = credentials['user']
         bucket_id = user['bucket']
@@ -563,6 +581,14 @@ class DriveService:
         
         display_name = f"{file_name}.{file_extension}" if file_extension else file_name
         print(f"     📤 Uploading '{display_name}' ({self._format_size(file_size)})...")
+        
+        # Log timestamp preservation attempt
+        if creation_time or modification_time:
+            print(f"     🕐 Attempting to preserve timestamps:")
+            if creation_time:
+                print(f"        Creation: {creation_time}")
+            if modification_time:
+                print(f"        Modification: {modification_time}")
         
         try:
             with open(file_path, 'rb') as f:
@@ -614,8 +640,32 @@ class DriveService:
                     'encryptVersion': 'Aes03',
                     'name': ''
                 }
+                
+                # Add timestamps using SDK-compatible field names
+                if creation_time:
+                    file_entry_payload['creationTime'] = creation_time
+                    print(f"     🕐 Added creationTime to payload")
+                if modification_time:
+                    file_entry_payload['modificationTime'] = modification_time
+                    print(f"     🕐 Added modificationTime to payload")
+                
                 created_file = self.api.create_file_entry(file_entry_payload)
                 pbar.update(1)
+                
+                # Verify if timestamps were actually set
+                if creation_time or modification_time:
+                    returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
+                    returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
+                    
+                    if creation_time and returned_creation:
+                        print(f"     ✅ Creation timestamp preserved: {returned_creation}")
+                    elif creation_time:
+                        print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
+                    
+                    if modification_time and returned_modification:
+                        print(f"     ✅ Modification timestamp preserved: {returned_modification}")
+                    elif modification_time:
+                        print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
             
             except Exception as e:
                 pbar.close()
@@ -896,24 +946,47 @@ class DriveService:
         
         return stats
     
+    def should_include_file(self, file_path: Path, include_patterns: List[str], 
+                            exclude_patterns: List[str]) -> bool:
+        """Check if a file should be included based on include/exclude patterns"""
+        import fnmatch
+        file_name = file_path.name
+        
+        # If include patterns specified, file must match at least one
+        if include_patterns:
+            matches_include = any(fnmatch.fnmatch(file_name, pattern) for pattern in include_patterns)
+            if not matches_include:
+                return False
+        
+        # If exclude patterns specified, file must not match any
+        if exclude_patterns:
+            matches_exclude = any(fnmatch.fnmatch(file_name, pattern) for pattern in exclude_patterns)
+            if matches_exclude:
+                return False
+        
+        return True
+
     def upload_single_item_with_conflict_handling(
-        self,
-        local_path: Path,
-        target_remote_parent_path_str: str,
-        target_folder_uuid: str,
-        on_conflict: str,
-        remote_filename: Optional[str] = None
-    ) -> str:
+            self,
+            local_path: Path,
+            target_remote_parent_path_str: str,
+            target_folder_uuid: str,
+            on_conflict: str,
+            remote_filename: Optional[str] = None,
+            creation_time: Optional[str] = None,
+            modification_time: Optional[str] = None
+        ) -> str:
         """
         Uploads a single local file, handling conflicts based on the specified strategy.
-        Used by the main upload command.
-
+        
         Args:
             local_path: Path object for the local file.
             target_remote_parent_path_str: The full intended remote path of the PARENT folder.
             target_folder_uuid: The UUID of the *immediate parent* remote folder to upload into.
             on_conflict: 'skip' or 'overwrite'.
             remote_filename: If specified, use this filename instead of local_path.name.
+            creation_time: ISO format timestamp for file creation (optional).
+            modification_time: ISO format timestamp for file modification (optional).
 
         Returns:
             "uploaded", "skipped", or "error"
@@ -940,23 +1013,24 @@ class DriveService:
         # Construct the full path of the potential target FILE for existence check
         full_target_remote_path = f"{target_remote_parent_path_str.rstrip('/')}/{effective_remote_filename}"
         if full_target_remote_path.startswith('//'):
-            full_target_remote_path = full_target_remote_path[1:]  # Remove duplicate slash
+            full_target_remote_path = full_target_remote_path[1:]
         if not full_target_remote_path.startswith('/'):
             full_target_remote_path = '/' + full_target_remote_path
 
         print(f"  -> Preparing upload: '{local_path.name}' ({self._format_size(file_size)}) to '{full_target_remote_path}'")
+        
+        if creation_time or modification_time:
+            print(f"  -> 🕐 With timestamp preservation")
 
         existing_item_info = None
         try:
-            # Check if the specific FILE path already exists
             existing_item_info = self.resolve_path(full_target_remote_path)
             print(f"  -> Target exists: {full_target_remote_path} (Type: {existing_item_info['type']})")
         except FileNotFoundError:
             print(f"  -> Target does not exist, proceeding with upload")
-            pass  # Doesn't exist, proceed to upload
+            pass
         except Exception as e:
             print(f"  -> ⚠️  Error checking target existence: {e}")
-            # Continue anyway
 
         if existing_item_info:
             if on_conflict == 'skip':
@@ -967,41 +1041,36 @@ class DriveService:
                     print(f"  -> ❌ Cannot overwrite folder with a file: {full_target_remote_path}")
                     return "error"
                 else:
-                    # File exists, proceed to overwrite (delete first, then upload)
                     print(f"  -> 🔄 Overwriting existing file...")
                     try:
-                        # Use permanent delete API, assuming trash isn't needed for overwrite
                         self.delete_permanently_by_path(full_target_remote_path)
                         print(f"  -> 🗑️  Deleted existing file for overwrite")
                     except Exception as del_err:
                         print(f"  -> ❌ Error deleting existing file for overwrite: {del_err}")
                         return "error"
-            else:  # Should not happen with click.Choice validation
+            else:
                 print(f"  -> ❌ Invalid conflict mode '{on_conflict}'")
                 return "error"
 
         # --- Proceed with upload ---
         try:
-            # Extract name and extension for upload_file_to_folder
             file_stem = Path(effective_remote_filename).stem
             file_suffix = Path(effective_remote_filename).suffix.lstrip('.')
             
-            # Handle files without extension
             if not file_suffix and '.' not in effective_remote_filename:
-                # No extension at all
                 file_suffix = ''
             elif not file_suffix and '.' in effective_remote_filename:
-                # Filename starts with dot (hidden file)
                 file_stem = effective_remote_filename
                 file_suffix = ''
 
-            # Use the existing upload_file_to_folder which handles encryption etc.
-            # Pass the immediate parent UUID and the desired filename components
+            # Upload with timestamps
             self.upload_file_to_folder(
                 str(local_path),
                 target_folder_uuid,
                 custom_name=file_stem,
-                custom_extension=file_suffix if file_suffix else None
+                custom_extension=file_suffix if file_suffix else None,
+                creation_time=creation_time,
+                modification_time=modification_time
             )
             print(f"  -> ✅ Successfully uploaded: {effective_remote_filename}")
             return "uploaded"
@@ -1011,60 +1080,107 @@ class DriveService:
             traceback.print_exc()
             return "error"
 
-    def download_file(self, file_uuid: str, destination_path_str: str):
-        """Download and decrypt file"""
+    def download_file(self, file_uuid: str, destination_path_str: str, 
+                    preserve_timestamps: bool = False):
+        """Download and decrypt file with optional timestamp preservation"""
         credentials = self.auth.get_auth_details()
         user = credentials['user']
         mnemonic = user['mnemonic']
         network_auth = self._get_network_auth(user)
-
+        
         print(f"📥 Downloading file UUID: {file_uuid} ...")
-
-        with tqdm(total=5, desc="Downloading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+        
+        with tqdm(total=5, desc="Downloading", unit="step", 
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+            
             pbar.set_description("📋 Fetching file metadata")
             metadata = self.api.get_file_metadata(file_uuid)
+            
             bucket_id = metadata['bucket']
             network_file_id = metadata['fileId']
             file_size = int(metadata['size'])
-
             file_name = metadata.get('plainName', 'downloaded_file')
             file_type = metadata.get('type')
+            
+            # Extract timestamps from metadata
+            creation_time = metadata.get('creationTime') or metadata.get('createdAt')
+            modification_time = metadata.get('modificationTime') or metadata.get('updatedAt')
+            
             if file_type:
                 file_name = f"{file_name}.{file_type}"
+            
+            print(f"     📄 File: {file_name}")
+            print(f"     📊 Size: {self._format_size(file_size)}")
+            if preserve_timestamps:
+                print(f"     🕐 Remote timestamps:")
+                if creation_time:
+                    print(f"        Creation: {creation_time}")
+                if modification_time:
+                    print(f"        Modification: {modification_time}")
+            
             pbar.update(1)
-
+            
             pbar.set_description("🔗 Fetching download links")
             links_response = self.api.get_download_links(bucket_id, network_file_id, auth=network_auth)
             download_url = links_response['shards'][0]['url']
             file_index_hex = links_response['index']
+            print(f"     🔗 Download URL acquired")
             pbar.update(1)
-
+            
             pbar.set_description("☁️  Downloading encrypted data")
             encrypted_data = self.api.download_chunk(download_url)
+            print(f"     ☁️  Downloaded {self._format_size(len(encrypted_data))} encrypted")
             pbar.update(1)
-
-            pbar.set_description("🔐 Decrypting with exact protocol")
+            
+            pbar.set_description("🔐 Decrypting")
             decrypted_data = self.crypto.decrypt_stream_internxt_protocol(
                 encrypted_data, mnemonic, bucket_id, file_index_hex
             )
-
-            # ------------------------------------------------------------------
-            # Always trim the decrypted data to the exact file size from metadata.
-            # AES-CTR decryption can result in extra bytes that need to be discarded.
-            # ------------------------------------------------------------------
+            
+            # Always trim to exact file size
             decrypted_data = decrypted_data[:file_size]
+            print(f"     🔐 Decrypted {self._format_size(len(decrypted_data))}")
             pbar.update(1)
-
+            
             destination_path = Path(destination_path_str)
             if destination_path.is_dir():
                 destination_path = destination_path / file_name
-
+            
             pbar.set_description(f"💾 Saving to disk")
             with open(destination_path, 'wb') as f:
                 f.write(decrypted_data)
+            print(f"     💾 Saved to: {destination_path}")
             pbar.update(1)
-
-        print(f"✅ Success! File downloaded and saved to '{destination_path}'")
+        
+        # Set timestamps if requested
+        if preserve_timestamps and (creation_time or modification_time):
+            try:
+                import os
+                from datetime import datetime
+                
+                stat_info = destination_path.stat()
+                
+                # Parse timestamps
+                if modification_time:
+                    try:
+                        # Try parsing ISO format
+                        mtime = datetime.fromisoformat(modification_time.replace('Z', '+00:00'))
+                        mtime_ts = mtime.timestamp()
+                        
+                        # Set access and modification times
+                        os.utime(destination_path, (mtime_ts, mtime_ts))
+                        print(f"     🕐 Set modification time: {modification_time}")
+                    except Exception as e:
+                        print(f"     ⚠️  Could not set modification time: {e}")
+                
+                # Note: Setting creation time is platform-specific and often not supported
+                if creation_time:
+                    print(f"     ℹ️  Note: Creation time cannot be set on most systems")
+                    
+            except Exception as e:
+                print(f"     ⚠️  Could not preserve timestamps: {e}")
+        
+        print(f"✅ Success! File downloaded to '{destination_path}'")
         return str(destination_path)
 
     def _format_size(self, size_bytes: int) -> str:

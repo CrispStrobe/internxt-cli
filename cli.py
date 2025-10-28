@@ -288,11 +288,16 @@ def mkdir(name: str, parent_folder_id: Optional[str]):
         click.echo(f"❌ Error creating folder: {error_msg}", err=True)
 
 @cli.command()
-@click.argument('sources', nargs=-1, type=str)  # Changed: removed resolve_path=True, just take strings
+@click.argument('sources', nargs=-1, type=str)
 @click.option('--target', '-t', 'target_path', default='/', help='Destination path on Internxt Drive (default: /)')
 @click.option('--recursive', '-r', is_flag=True, help='Upload directories recursively')
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='skip', help='Action if target exists (overwrite/skip)')
-def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: str):
+@click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file creation and modification times')
+@click.option('--include', multiple=True, help='Include only files matching pattern (e.g., --include "*.png" --include "*.jpg")')
+@click.option('--exclude', multiple=True, help='Exclude files matching pattern (e.g., --exclude "*.tmp" --exclude ".DS_Store")')
+@click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
+def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: str, 
+           preserve_timestamps: bool, include: Tuple[str], exclude: Tuple[str], verbose: bool):
     """
     Encrypts and uploads local files/folders to a remote path.
 
@@ -302,33 +307,54 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
     Trailing slash behavior (like rsync):
       source/  → uploads contents to target (no new folder)
       source   → creates 'source' folder in target
+    
+    Use --preserve-timestamps to maintain original file dates (experimental).
+    Use --include/--exclude to filter files by pattern (supports wildcards).
+    
+    Examples:
+      Upload only images:
+        python cli.py upload photos/ -t /Backup -r --include "*.png" --include "*.jpg"
+      
+      Upload all except temp files:
+        python cli.py upload project/ -t /Code -r --exclude "*.tmp" --exclude ".DS_Store"
+      
+      Preserve timestamps:
+        python cli.py upload docs/ -t /Documents -r --preserve-timestamps
     """
     if not sources:
         click.echo("❌ No source files or directories specified.", err=True)
         sys.exit(1)
 
+    # Convert include/exclude tuples to lists
+    include_patterns = list(include) if include else []
+    exclude_patterns = list(exclude) if exclude else []
+    
+    if verbose or include_patterns or exclude_patterns:
+        if include_patterns:
+            click.echo(f"🔍 Include filters: {', '.join(include_patterns)}")
+        if exclude_patterns:
+            click.echo(f"🚫 Exclude filters: {', '.join(exclude_patterns)}")
+
     try:
-        credentials = auth_service.get_auth_details() # Ensures logged in
-        click.echo(f"🎯 Preparing the upload to remote path: {target_path}")
+        credentials = auth_service.get_auth_details()
+        click.echo(f"🎯 Preparing upload to remote path: {target_path}")
 
         # --- Resolve or Create Target Folder ---
         target_folder_uuid = None
-        target_folder_path_str = "/" # Default to root if path resolution fails somehow
+        target_folder_path_str = "/"
         try:
             target_folder_info = drive_service.resolve_path(target_path)
             if target_folder_info['type'] != 'folder':
                 click.echo(f"❌ Target path '{target_path}' exists but is not a folder.", err=True)
                 sys.exit(1)
             target_folder_uuid = target_folder_info['uuid']
-            target_folder_path_str = target_folder_info['path'] # Use resolved path
+            target_folder_path_str = target_folder_info['path']
             click.echo(f"✅ Target folder exists: '{target_folder_path_str}' (UUID: {target_folder_uuid[:8]}...)")
         except FileNotFoundError:
             click.echo(f"⏳ Target path '{target_path}' not found. Attempting to create...")
             try:
-                # create_folder_recursive ensures the full path exists
                 created_folder = drive_service.create_folder_recursive(target_path)
                 target_folder_uuid = created_folder['uuid']
-                # Re-resolve to get the canonical path string
                 target_folder_info = drive_service.resolve_path(target_path)
                 target_folder_path_str = target_folder_info['path']
                 click.echo(f"✅ Created target folder '{target_folder_path_str}' (UUID: {target_folder_uuid[:8]}...)")
@@ -340,74 +366,57 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
             sys.exit(1)
 
         if not target_folder_uuid:
-             click.echo("❌ Could not determine target folder UUID. Aborting.", err=True)
-             sys.exit(1)
+            click.echo("❌ Could not determine target folder UUID. Aborting.", err=True)
+            sys.exit(1)
 
         # --- Process Sources ---
-        items_to_process = [] # Store tuples: (local_path_obj, base_source_dir_obj | None, copy_contents_only)
+        items_to_process = []
         click.echo("🔍 Expanding source paths...")
         for source_arg in sources:
-            # IMPORTANT: Detect trailing slash BEFORE path resolution
             has_trailing_slash = source_arg.rstrip().endswith('/') or source_arg.rstrip().endswith(os.sep)
-            
-            # Now resolve the path (this will strip trailing slash)
             source_path = Path(source_arg)
             
-            # Validate the source exists
             if not source_path.exists():
                 click.echo(f"⚠️ Source not found: {source_arg}", err=True)
                 continue
             
             source_path_resolved = source_path.resolve()
             source_path_str = str(source_path_resolved)
-
-            # Use glob with recursive=True to handle **/ patterns correctly if -r is given
             matches = glob.glob(source_path_str, recursive=recursive)
 
             if not matches:
                 click.echo(f"⚠️ Source not found or matched nothing: {source_arg}", err=True)
                 continue
 
-            # Determine the base directory for relative path calculation
-            # If the arg has wildcards, the base is the part before the first wildcard
             base_dir_str = source_path_str
             if "*" in source_arg or "?" in source_arg or "[" in source_arg:
-                 # Find the directory part before the first wildcard pattern
-                 path_parts = Path(source_arg).parts
-                 non_wildcard_parts = []
-                 for part in path_parts:
-                      if "*" in part or "?" in part or "[" in part:
-                           break
-                      non_wildcard_parts.append(part)
-                 # If wildcards are in the first part, base is cwd, otherwise join parts
-                 if non_wildcard_parts:
-                      base_dir_str = str(Path(*non_wildcard_parts))
-                      # If the source arg itself points to a directory, use it directly
-                      if Path(source_arg).is_dir() and not ("*" in source_arg or "?" in source_arg or "[" in source_arg):
-                           base_dir_str = str(Path(source_arg))
-                 else:
-                      base_dir_str = os.getcwd() # Wildcard in the first element, relative to cwd
-                 # Ensure base_dir is absolute if source_arg was absolute
-                 if Path(source_arg).is_absolute():
-                      base_dir_path = Path(base_dir_str)
-                      if not base_dir_path.is_absolute():
-                           base_dir_path = Path.cwd() / base_dir_path
-                      base_dir_str = str(base_dir_path.resolve())
+                path_parts = Path(source_arg).parts
+                non_wildcard_parts = []
+                for part in path_parts:
+                    if "*" in part or "?" in part or "[" in part:
+                        break
+                    non_wildcard_parts.append(part)
+                if non_wildcard_parts:
+                    base_dir_str = str(Path(*non_wildcard_parts))
+                    if Path(source_arg).is_dir() and not ("*" in source_arg or "?" in source_arg or "[" in source_arg):
+                        base_dir_str = str(Path(source_arg))
+                else:
+                    base_dir_str = os.getcwd()
+                if Path(source_arg).is_absolute():
+                    base_dir_path = Path(base_dir_str)
+                    if not base_dir_path.is_absolute():
+                        base_dir_path = Path.cwd() / base_dir_path
+                    base_dir_str = str(base_dir_path.resolve())
 
             base_source_dir = Path(base_dir_str)
             if base_source_dir.is_file():
-                 base_source_dir = base_source_dir.parent # Base is the parent dir if arg is a file
-
+                base_source_dir = base_source_dir.parent
 
             for match_str in matches:
                 match_path = Path(match_str).resolve()
-                # If the match itself is a directory, use it as the base_source_dir for its contents
                 current_base = base_source_dir if not match_path.is_dir() else match_path.parent
-                
-                # For directories, pass the trailing slash flag
                 copy_contents_only = has_trailing_slash if match_path.is_dir() else False
                 items_to_process.append((match_path, current_base, copy_contents_only))
-
 
         if not items_to_process:
             click.echo("❌ No valid source files or directories found after expansion.", err=True)
@@ -419,30 +428,70 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
         success_count = 0
         skipped_count = 0
         error_count = 0
+        filtered_count = 0
 
-        processed_dirs = set() # Avoid processing contents of a dir multiple times if matched by wildcard
+        processed_dirs = set()
 
         for local_path, base_source_dir, copy_contents_only in items_to_process:
             try:
-                click.echo("-" * 40)
-                click.echo(f"Processing: {local_path}")
+                if verbose:
+                    click.echo("-" * 40)
+                    click.echo(f"Processing: {local_path}")
 
                 if local_path.is_file():
-                    # It's a file, upload it directly to the target folder
+                    # Apply include/exclude filters
+                    if not drive_service.should_include_file(local_path, include_patterns, exclude_patterns):
+                        if verbose:
+                            click.echo(f"  -> 🚫 Filtered out: {local_path.name}")
+                        filtered_count += 1
+                        continue
+                    
+                    # Get timestamps if preservation requested
+                    creation_time = None
+                    modification_time = None
+                    
+                    if preserve_timestamps:
+                        try:
+                            stat_info = local_path.stat()
+                            from datetime import datetime, timezone
+                            
+                            mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                            modification_time = mtime.isoformat()
+                            
+                            try:
+                                ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                creation_time = ctime.isoformat()
+                            except AttributeError:
+                                ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                                creation_time = ctime.isoformat()
+                            
+                            if verbose:
+                                click.echo(f"  🕐 Local file timestamps:")
+                                click.echo(f"     Creation: {creation_time}")
+                                click.echo(f"     Modification: {modification_time}")
+                        except Exception as e:
+                            if verbose:
+                                click.echo(f"  ⚠️  Could not read timestamps: {e}")
+                    
+                    # Upload
                     upload_result = drive_service.upload_single_item_with_conflict_handling(
                         local_path,
-                        target_folder_path_str, # Parent remote path
-                        target_folder_uuid,     # Parent remote UUID
+                        target_folder_path_str,
+                        target_folder_uuid,
                         on_conflict,
-                        remote_filename=local_path.name # Use the file's own name
+                        remote_filename=local_path.name,
+                        creation_time=creation_time,
+                        modification_time=modification_time
                     )
+                    
                     if upload_result == "uploaded": success_count += 1
                     elif upload_result == "skipped": skipped_count += 1
                     else: error_count += 1
 
                 elif local_path.is_dir():
                     if local_path in processed_dirs:
-                        click.echo(f"  -> Skipping already processed directory: {local_path}")
+                        if verbose:
+                            click.echo(f"  -> Skipping already processed directory: {local_path}")
                         continue
 
                     if not recursive:
@@ -450,57 +499,76 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                         skipped_count += 1
                         continue
 
-                    # It's a directory, upload its contents recursively
                     click.echo(f"📂 Processing directory recursively: {local_path}")
-                    processed_dirs.add(local_path) # Mark as processed
+                    processed_dirs.add(local_path)
 
-                    # Define the base remote path for this directory's contents
-                    # Check if source had trailing slash (copy contents only)
                     if copy_contents_only:
-                        # Upload contents directly to target (no new folder)
                         click.echo(f"  ✨ Copying contents directly to target (trailing slash detected)")
                         dir_remote_base_path = Path(target_folder_path_str)
                     else:
-                        # Create folder with directory name in target
                         click.echo(f"  📁 Creating folder '{local_path.name}' in target")
                         dir_remote_base_path = Path(target_folder_path_str) / local_path.name
 
                     for item in local_path.rglob('*'):
                         if item.is_file():
+                            # Apply include/exclude filters
+                            if not drive_service.should_include_file(item, include_patterns, exclude_patterns):
+                                if verbose:
+                                    click.echo(f"  -> 🚫 Filtered: {item.name}")
+                                filtered_count += 1
+                                continue
+                            
                             relative_path = item.relative_to(local_path)
-                            # Construct remote target path for this specific file
                             item_target_parent_path = dir_remote_base_path / relative_path.parent
                             item_target_parent_path_str = str(item_target_parent_path).replace('\\', '/')
                             if not item_target_parent_path_str.startswith('/'):
                                 item_target_parent_path_str = '/' + item_target_parent_path_str
 
-                            click.echo(f"  -> Found file: {item} (relative: {relative_path})")
-                            click.echo(f"     Target parent path: {item_target_parent_path_str}")
+                            if verbose:
+                                click.echo(f"  -> Found file: {item.name} (relative: {relative_path})")
+                                click.echo(f"     Target parent path: {item_target_parent_path_str}")
 
-                            # Ensure parent remote folder exists
                             parent_folder_uuid = None
                             try:
                                 parent_folder = drive_service.create_folder_recursive(item_target_parent_path_str)
                                 parent_folder_uuid = parent_folder['uuid']
-                                click.echo(f"     Ensured parent folder exists (UUID: {parent_folder_uuid[:8]}...)")
+                                if verbose:
+                                    click.echo(f"     Ensured parent folder exists (UUID: {parent_folder_uuid[:8]}...)")
                             except Exception as create_err:
                                 click.echo(f"     ❌ Error ensuring parent folder {item_target_parent_path_str}: {create_err}", err=True)
                                 error_count += 1
-                                continue # Skip this file
+                                continue
 
-                            # Upload the file itself into the correct parent folder
+                            # Get timestamps if requested
+                            creation_time = None
+                            modification_time = None
+                            if preserve_timestamps:
+                                try:
+                                    stat_info = item.stat()
+                                    from datetime import datetime, timezone
+                                    mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                                    modification_time = mtime.isoformat()
+                                    try:
+                                        ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                        creation_time = ctime.isoformat()
+                                    except AttributeError:
+                                        ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                                        creation_time = ctime.isoformat()
+                                except Exception:
+                                    pass
+
                             upload_result = drive_service.upload_single_item_with_conflict_handling(
                                 item,
-                                item_target_parent_path_str, # Target path is the parent folder
-                                parent_folder_uuid,          # Target UUID is the parent folder
+                                item_target_parent_path_str,
+                                parent_folder_uuid,
                                 on_conflict,
-                                remote_filename=item.name    # Specify the filename explicitly
+                                remote_filename=item.name,
+                                creation_time=creation_time,
+                                modification_time=modification_time
                             )
                             if upload_result == "uploaded": success_count += 1
                             elif upload_result == "skipped": skipped_count += 1
-                            else: error_count += 1 # Error occurred within the function
-                        # No need to explicitly handle directories here, rglob finds files,
-                        # and create_folder_recursive handles the structure.
+                            else: error_count += 1
 
                 else:
                     click.echo(f"⚠️ Skipping unknown item type: {local_path}", err=True)
@@ -515,7 +583,9 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
         click.echo("=" * 40)
         click.echo("📊 Upload Summary:")
         click.echo(f"  ✅ Uploaded: {success_count}")
-        click.echo(f"  ⏭️ Skipped:  {skipped_count}")
+        click.echo(f"  ⏭️  Skipped:  {skipped_count}")
+        if filtered_count > 0:
+            click.echo(f"  🚫 Filtered: {filtered_count}")
         click.echo(f"  ❌ Errors:   {error_count}")
         click.echo("=" * 40)
 
@@ -525,17 +595,44 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
         traceback.print_exc()
         sys.exit(1)
 
-
-
 @cli.command()
 @click.argument('file_uuid')
-@click.option('--destination', '-d', type=click.Path(file_okay=True, writable=True, resolve_path=True), default='.')
-def download(file_uuid, destination):
+@click.option('--destination', '-d', type=click.Path(file_okay=True, writable=True, resolve_path=True), default='.', help='Where to save the file')
+@click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file modification times')
+@click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='overwrite', help='Action if local file exists')
+@click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
+def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_conflict: str, verbose: bool):
     """Downloads and decrypts a file from your Internxt Drive (by UUID)"""
     try:
-        drive_service.download_file(file_uuid, destination)
+        from pathlib import Path
+        
+        if verbose:
+            click.echo(f"📥 Downloading file with UUID: {file_uuid}")
+            click.echo(f"📁 Destination: {destination}")
+            if preserve_timestamps:
+                click.echo(f"🕐 Timestamp preservation: enabled")
+        
+        # Check if destination file already exists
+        dest_path = Path(destination)
+        if dest_path.is_file() and on_conflict == 'skip':
+            click.echo(f"⏭️  File exists, skipping: {dest_path}")
+            sys.exit(0)
+        
+        # Download the file
+        downloaded_path = drive_service.download_file(
+            file_uuid, 
+            destination,
+            preserve_timestamps=preserve_timestamps
+        )
+        
+        if not verbose:
+            click.echo(f"✅ File downloaded successfully to: {downloaded_path}")
+    
     except Exception as e:
         click.echo(f"❌ Error downloading file: {e}", err=True)
+        if verbose:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 
@@ -544,14 +641,17 @@ def download(file_uuid, destination):
 @cli.command('list-path')
 @click.argument('path', default='/')
 @click.option('--detailed', '-d', is_flag=True, help='Show detailed information')
-def list_path(path: str, detailed: bool):
+@click.option('--all', '-a', is_flag=True, help='Show all attributes (verbose)')
+def list_path(path: str, detailed: bool, all: bool):
     """List folder contents with paths (much more user-friendly!)"""
     try:
         auth_service.get_auth_details()
         
         content = drive_service.list_folder_with_paths(path)
         
-        click.echo(f"\n📁 Contents of: {content['current_path']}")
+        click.echo(f"\n📁 Listing folder: {path}")
+        click.echo()
+        click.echo(f"📁 Contents of: {content['current_path']}")
         click.echo("=" * 80)
         
         # Show folders first
@@ -559,8 +659,41 @@ def list_path(path: str, detailed: bool):
             click.echo("📂 Folders:")
             click.echo("-" * 60)
             for folder in content['folders']:
-                modified = folder.get('modified', '')[:10] if folder.get('modified') else ''
-                if detailed:
+                if all:
+                    # Show ALL attributes
+                    click.echo(f"  📁 {folder['display_name']}")
+                    click.echo(f"     UUID: {folder['uuid']}")
+                    click.echo(f"     Path: {folder['path']}")
+                    click.echo(f"     Plain Name: {folder.get('plainName', 'N/A')}")
+                    click.echo(f"     Parent ID: {folder.get('parentId', 'N/A')}")
+                    click.echo(f"     User ID: {folder.get('userId', 'N/A')}")
+                    
+                    # Timestamps for FOLDERS
+                    created_at = folder.get('createdAt', 'N/A')
+                    updated_at = folder.get('updatedAt', 'N/A')
+                    creation_time = folder.get('creationTime', 'N/A')
+                    modification_time = folder.get('modificationTime', 'N/A')
+                    
+                    if created_at != 'N/A':
+                        click.echo(f"     Created At: {format_date(created_at)} ({created_at})")
+                    else:
+                        click.echo(f"     Created At: N/A")
+                    if updated_at != 'N/A':
+                        click.echo(f"     Updated At: {format_date(updated_at)} ({updated_at})")
+                    else:
+                        click.echo(f"     Updated At: N/A")
+                    if creation_time != 'N/A':
+                        click.echo(f"     Creation Time: {format_date(creation_time)} ({creation_time})")
+                    if modification_time != 'N/A':
+                        click.echo(f"     Modification Time: {format_date(modification_time)} ({modification_time})")
+                    
+                    # Other attributes
+                    click.echo(f"     Deleted: {folder.get('deleted', False)}")
+                    click.echo(f"     Removed: {folder.get('removed', False)}")
+                    
+                    click.echo()
+                elif detailed:
+                    modified = folder.get('updatedAt', '')[:10] if folder.get('updatedAt') else ''
                     click.echo(f"  📁 {folder['display_name']:<30} {modified:<12} {folder['uuid'][:8]}...")
                 else:
                     click.echo(f"  📁 {folder['display_name']}")
@@ -572,11 +705,51 @@ def list_path(path: str, detailed: bool):
             click.echo("📄 Files:")
             click.echo("-" * 60)
             for file in content['files']:
-                modified = file.get('modified', '')[:10] if file.get('modified') else ''
-                size = file['size_display']
-                if detailed:
+                if all:
+                    # Show ALL attributes
+                    click.echo(f"  📄 {file['display_name']}")
+                    click.echo(f"     UUID: {file['uuid']}")
+                    click.echo(f"     Path: {file['path']}")
+                    click.echo(f"     Plain Name: {file.get('plainName', 'N/A')}")
+                    click.echo(f"     Type/Extension: {file.get('type', 'N/A')}")
+                    click.echo(f"     Size: {file['size_display']} ({file.get('size', 0)} bytes)")
+                    click.echo(f"     Folder ID: {file.get('folderId', 'N/A')}")
+                    click.echo(f"     User ID: {file.get('userId', 'N/A')}")
+                    click.echo(f"     File ID: {file.get('fileId', 'N/A')}")
+                    click.echo(f"     Bucket: {file.get('bucket', 'N/A')}")
+                    click.echo(f"     Encrypt Version: {file.get('encryptVersion', 'N/A')}")
+                    
+                    # Timestamps for FILES
+                    created_at = file.get('createdAt', 'N/A')
+                    updated_at = file.get('updatedAt', 'N/A')
+                    creation_time = file.get('creationTime', 'N/A')
+                    modification_time = file.get('modificationTime', 'N/A')
+                    
+                    if created_at != 'N/A':
+                        click.echo(f"     Created At: {format_date(created_at)} ({created_at})")
+                    else:
+                        click.echo(f"     Created At: N/A")
+                    if updated_at != 'N/A':
+                        click.echo(f"     Updated At: {format_date(updated_at)} ({updated_at})")
+                    else:
+                        click.echo(f"     Updated At: N/A")
+                    if creation_time != 'N/A':
+                        click.echo(f"     Creation Time: {format_date(creation_time)} ({creation_time})")
+                    if modification_time != 'N/A':
+                        click.echo(f"     Modification Time: {format_date(modification_time)} ({modification_time})")
+                    
+                    # Other attributes
+                    click.echo(f"     Deleted: {file.get('deleted', False)}")
+                    click.echo(f"     Removed: {file.get('removed', False)}")
+                    click.echo(f"     Status: {file.get('status', 'N/A')}")
+                    
+                    click.echo()
+                elif detailed:
+                    modified = file.get('updatedAt', '')[:10] if file.get('updatedAt') else ''
+                    size = file['size_display']
                     click.echo(f"  📄 {file['display_name']:<30} {size:<10} {modified:<12} {file['uuid'][:8]}...")
                 else:
+                    size = file['size_display']
                     click.echo(f"  📄 {file['display_name']:<30} {size}")
         
         if not content['folders'] and not content['files']:
@@ -584,8 +757,8 @@ def list_path(path: str, detailed: bool):
             
         click.echo(f"\nTotal: {len(content['folders'])} folders, {len(content['files'])} files")
         
-        # Show usage examples
-        if content['files']:
+        # Show usage examples (only if not showing all attributes)
+        if content['files'] and not all:
             example_file = content['files'][0]
             example_path = example_file['path']
             click.echo(f"\n💡 Usage examples:")
@@ -597,22 +770,186 @@ def list_path(path: str, detailed: bool):
         sys.exit(1)
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
-
 
 @cli.command('download-path')
 @click.argument('path')
-@click.option('--destination', '-d', help='Where to save the file')
-def download_path(path: str, destination: Optional[str]):
-    """Download a file by its path instead of UUID"""
+@click.option('--destination', '-d', '--target', '-t', 'destination', help='Where to save (file or directory)')
+@click.option('--recursive', '-r', is_flag=True, help='Download folders recursively')
+@click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='skip', help='Action if local file exists')
+@click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file modification times')
+@click.option('--include', multiple=True, help='Include only files matching pattern')
+@click.option('--exclude', multiple=True, help='Exclude files matching pattern')
+@click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
+def download_path(path: str, destination: Optional[str], recursive: bool, on_conflict: str,
+                  preserve_timestamps: bool, include: Tuple[str], exclude: Tuple[str], verbose: bool):
+    """
+    Download a file or folder by its path.
+    
+    Examples:
+      Download single file:
+        python cli.py download-path "/Documents/report.pdf"
+      
+      Download folder recursively:
+        python cli.py download-path "/Photos" -r -d ./local_photos
+      
+      Download only images:
+        python cli.py download-path "/Photos" -r --include "*.jpg" --include "*.png"
+      
+      With timestamp preservation:
+        python cli.py download-path "/Backup" -r -p
+    """
     try:
         auth_service.get_auth_details()
         
-        downloaded_path = drive_service.download_file_by_path(path, destination)
+        # Convert include/exclude tuples to lists
+        include_patterns = list(include) if include else []
+        exclude_patterns = list(exclude) if exclude else []
         
-        click.echo(f"\n🎉 Downloaded successfully!")
-        click.echo(f"📄 File: {path}")
-        click.echo(f"💾 Saved to: {downloaded_path}")
+        if verbose and (include_patterns or exclude_patterns):
+            if include_patterns:
+                click.echo(f"🔍 Include filters: {', '.join(include_patterns)}")
+            if exclude_patterns:
+                click.echo(f"🚫 Exclude filters: {', '.join(exclude_patterns)}")
+        
+        # Resolve the remote path
+        item_info = drive_service.resolve_path(path)
+        
+        if item_info['type'] == 'file':
+            # Single file download
+            if verbose:
+                click.echo(f"📥 Downloading file: {path}")
+            
+            # Apply filters
+            file_name = item_info.get('plainName', '')
+            if item_info.get('type'):
+                file_name = f"{file_name}.{item_info.get('type')}"
+            
+            if not drive_service.should_include_file(Path(file_name), include_patterns, exclude_patterns):
+                click.echo(f"🚫 File filtered out by include/exclude patterns")
+                sys.exit(0)
+            
+            # Determine destination
+            if destination:
+                dest_path = Path(destination)
+            else:
+                dest_path = Path.cwd() / file_name
+            
+            # Check conflict
+            if dest_path.exists() and on_conflict == 'skip':
+                click.echo(f"⏭️  File exists, skipping: {dest_path}")
+                sys.exit(0)
+            
+            # Download
+            downloaded_path = drive_service.download_file(
+                item_info['uuid'], 
+                str(dest_path.parent if dest_path.is_file() or not dest_path.exists() else dest_path),
+                preserve_timestamps=preserve_timestamps
+            )
+            
+            click.echo(f"\n🎉 Downloaded successfully!")
+            click.echo(f"📄 From: {path}")
+            click.echo(f"💾 To: {downloaded_path}")
+            
+        elif item_info['type'] == 'folder':
+            if not recursive:
+                click.echo(f"❌ '{path}' is a folder. Use -r to download recursively.", err=True)
+                sys.exit(1)
+            
+            # Recursive folder download
+            click.echo(f"📂 Downloading folder recursively: {path}")
+            
+            # Determine base destination
+            if destination:
+                base_dest = Path(destination)
+            else:
+                folder_name = item_info.get('plainName', 'download')
+                base_dest = Path.cwd() / folder_name
+            
+            base_dest.mkdir(parents=True, exist_ok=True)
+            
+            # Download folder contents recursively
+            success_count = 0
+            skipped_count = 0
+            error_count = 0
+            filtered_count = 0
+            
+            def download_folder_recursive(folder_uuid: str, current_dest: Path, current_path: str):
+                nonlocal success_count, skipped_count, error_count, filtered_count
+                
+                # Get folder contents
+                content = drive_service.get_folder_content(folder_uuid)
+                
+                # Download files
+                for file_info in content.get('files', []):
+                    file_name = file_info.get('plainName', '')
+                    if file_info.get('type'):
+                        file_name = f"{file_name}.{file_info.get('type')}"
+                    
+                    # Apply filters
+                    if not drive_service.should_include_file(Path(file_name), include_patterns, exclude_patterns):
+                        if verbose:
+                            click.echo(f"  -> 🚫 Filtered: {file_name}")
+                        filtered_count += 1
+                        continue
+                    
+                    file_dest = current_dest / file_name
+                    
+                    # Check conflict
+                    if file_dest.exists() and on_conflict == 'skip':
+                        if verbose:
+                            click.echo(f"  -> ⏭️  Skipping existing: {file_name}")
+                        skipped_count += 1
+                        continue
+                    
+                    try:
+                        if verbose:
+                            click.echo(f"  -> Downloading: {file_name}")
+                        
+                        drive_service.download_file(
+                            file_info['uuid'],
+                            str(current_dest),
+                            preserve_timestamps=preserve_timestamps
+                        )
+                        success_count += 1
+                    except Exception as e:
+                        click.echo(f"  -> ❌ Error downloading {file_name}: {e}", err=True)
+                        error_count += 1
+                
+                # Process subfolders
+                for folder_info in content.get('folders', []):
+                    folder_name = folder_info.get('plainName', folder_info.get('name', ''))
+                    subfolder_dest = current_dest / folder_name
+                    subfolder_dest.mkdir(parents=True, exist_ok=True)
+                    
+                    if verbose:
+                        click.echo(f"📂 Entering folder: {folder_name}")
+                    
+                    download_folder_recursive(
+                        folder_info['uuid'],
+                        subfolder_dest,
+                        f"{current_path}/{folder_name}"
+                    )
+            
+            # Start recursive download
+            download_folder_recursive(item_info['uuid'], base_dest, path)
+            
+            # Summary
+            click.echo("\n" + "=" * 40)
+            click.echo("📊 Download Summary:")
+            click.echo(f"  ✅ Downloaded: {success_count}")
+            click.echo(f"  ⏭️  Skipped:    {skipped_count}")
+            if filtered_count > 0:
+                click.echo(f"  🚫 Filtered:   {filtered_count}")
+            click.echo(f"  ❌ Errors:     {error_count}")
+            click.echo(f"  📁 To: {base_dest}")
+            click.echo("=" * 40)
+        
+        else:
+            click.echo(f"❌ Unknown item type: {item_info['type']}", err=True)
+            sys.exit(1)
         
     except FileNotFoundError as e:
         click.echo(f"❌ File not found: {e}", err=True)
@@ -622,6 +959,8 @@ def download_path(path: str, destination: Optional[str]):
         sys.exit(1)
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -882,9 +1221,43 @@ def delete_permanently_by_path(path: str, force: bool):
 @click.option('--port', type=int, help='Port to run WebDAV server on')
 @click.option('--background', '-b', is_flag=True, help='Run server in background')
 @click.option('--show-mount', is_flag=True, help='Show mount instructions')
-def webdav_start(port: Optional[int], background: bool, show_mount: bool):
-    """Start WebDAV server to mount Internxt Drive as a local drive"""
+@click.option('--no-preserve-timestamps', is_flag=True, help='Do NOT preserve file timestamps (preserves by default)')
+def webdav_start(port: Optional[int], background: bool, show_mount: bool, no_preserve_timestamps: bool):
+    """
+    Start WebDAV server to mount Internxt Drive as a local drive.
+    
+    By default, file timestamps are preserved when copying/uploading files.
+    Use --no-preserve-timestamps to disable this behavior.
+    """
     try:
+        # Check if logged in
+        try:
+            auth_service.get_auth_details()
+        except Exception:
+            click.echo("❌ Not logged in. Please login first with: python cli.py login", err=True)
+            sys.exit(1)
+        
+        # Read and update config
+        webdav_config = config_service.read_webdav_config()
+        
+        # Override with command-line options
+        if port:
+            webdav_config['port'] = port
+        
+        # Handle timestamp preservation
+        if no_preserve_timestamps:
+            webdav_config['preserveTimestamps'] = False
+            click.echo("⚠️  Timestamp preservation disabled for this session")
+        else:
+            # Always default to True
+            webdav_config['preserveTimestamps'] = True
+        
+        # Save config (preserves settings for next time, except --no-preserve-timestamps which is session-only)
+        config_to_save = webdav_config.copy()
+        if not no_preserve_timestamps:
+            # Only save if user didn't explicitly disable it for this session
+            config_service.save_webdav_config(config_to_save)
+        
         # Handle background mode by spawning a separate process
         if background:
             import subprocess
@@ -893,6 +1266,8 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool):
             cmd = [sys.executable, __file__, 'webdav-start']
             if port:
                 cmd.extend(['--port', str(port)])
+            if no_preserve_timestamps:
+                cmd.append('--no-preserve-timestamps')
             # Don't pass --background to avoid infinite recursion
             
             # Check if already running
@@ -928,9 +1303,10 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool):
                 status = webdav_server.status()
                 if status.get('running'):
                     click.echo(f"✅ WebDAV server started in background (PID: {process.pid})")
-                    click.echo(f"🌐 Server URL: http://localhost:{port or 3005}/")
+                    click.echo(f"🌐 Server URL: http://localhost:{webdav_config['port']}/")
                     click.echo(f"👤 Username: internxt")
                     click.echo(f"🔑 Password: internxt-webdav")
+                    click.echo(f"🕐 Preserve Timestamps: {'Yes' if webdav_config['preserveTimestamps'] else 'No'}")
                     click.echo(f"\n📋 Logs: {log_file}")
                     click.echo(f"💡 Use 'python cli.py webdav-stop' to stop the server")
                     click.echo(f"💡 Use 'python cli.py webdav-status' to check status")
@@ -941,7 +1317,17 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool):
             return
         
         # Foreground mode - run directly
-        result = webdav_server.start(port=port, background=False)
+        click.echo("🚀 Starting WebDAV server...")
+        click.echo(f"📡 Protocol: {webdav_config['protocol'].upper()}")
+        click.echo(f"🔌 Port: {webdav_config['port']}")
+        click.echo(f"⏰ Timeout: {webdav_config['timeoutMinutes']} minutes")
+        click.echo(f"🕐 Preserve Timestamps: {'Yes' if webdav_config['preserveTimestamps'] else 'No'}")
+        
+        result = webdav_server.start(
+            port=int(webdav_config['port']),
+            background=False,
+            preserve_timestamps=webdav_config['preserveTimestamps']  # NEW: Pass to server
+        )
         
         if result['success']:
             click.echo(f"✅ {result['message']}")
@@ -1282,7 +1668,9 @@ def webdav_config():
         click.echo(f"🏠 Host: {webdav_config.get('host', 'localhost')}")
         click.echo(f"🚪 Port: {webdav_config.get('port', 8080)}")
         click.echo(f"⏱️  Timeout: {webdav_config.get('timeoutMinutes', 30)} minutes")
+        click.echo(f"🕐 Preserve Timestamps: {webdav_config.get('preserveTimestamps', True)}")
         click.echo(f"📝 Verbose: Level {webdav_config.get('verbose', 0)}")
+        click.echo("\n📝 Config file: " + str(config_service.webdav_configs_file))
         
         # SSL certificate info
         click.echo(f"\n🔐 SSL Certificates:")
@@ -1308,6 +1696,7 @@ def webdav_config():
         click.echo(f"   Start server:    python cli.py webdav-start")
         click.echo(f"   Start with SSL:  python cli.py webdav-start  # (auto-detects from config)")
         click.echo(f"   Custom port:     python cli.py webdav-start --port 9090")
+        click.echo(f"   Disable timestamps:    python cli.py webdav-start --no-preserve-timestamps")
         click.echo(f"   Background mode: python cli.py webdav-start --background")
         click.echo(f"   Stop server:     python cli.py webdav-stop")
         

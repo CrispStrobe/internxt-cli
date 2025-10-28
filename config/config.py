@@ -222,10 +222,7 @@ class ConfigService:
         """
         self._ensure_internxt_cli_data_dir_exists()
         
-        # EXACT match to TypeScript:
-        # const configs = JSON.stringify(webdavConfig);
-        # await fs.writeFile(ConfigService.WEBDAV_CONFIGS_FILE, configs, 'utf8');
-        configs = json.dumps(webdav_config)
+        configs = json.dumps(webdav_config, indent=2)  # Added indent for readability
         
         with open(self.webdav_configs_file, 'w', encoding='utf-8') as f:
             f.write(configs)
@@ -233,18 +230,9 @@ class ConfigService:
     def read_webdav_config(self) -> Dict[str, Any]:
         """
         Read WebDAV configuration with defaults
-        EXACT match to TypeScript ConfigService.readWebdavConfig()
+        Enhanced with timestamp preservation support
         """
         try:
-            # EXACT match to TypeScript:
-            # const configsData = await fs.readFile(ConfigService.WEBDAV_CONFIGS_FILE, 'utf8');
-            # const configs = JSON.parse(configsData);
-            # return {
-            #   port: configs?.port ?? ConfigService.WEBDAV_DEFAULT_PORT,
-            #   protocol: configs?.protocol ?? ConfigService.WEBDAV_DEFAULT_PROTOCOL,
-            #   timeoutMinutes: configs?.timeoutMinutes ?? ConfigService.WEBDAV_DEFAULT_TIMEOUT,
-            # };
-            
             with open(self.webdav_configs_file, 'r', encoding='utf-8') as f:
                 configs_data = f.read()
                 
@@ -254,14 +242,16 @@ class ConfigService:
                 'port': configs.get('port', self.webdav_default_port),
                 'protocol': configs.get('protocol', self.webdav_default_protocol),
                 'timeoutMinutes': configs.get('timeoutMinutes', self.webdav_default_timeout),
+                'preserveTimestamps': configs.get('preserveTimestamps', True),  # NEW: Default to True
             }
             
         except Exception:
-            # EXACT match to TypeScript: catch { return default config }
+            # Return default config with timestamp preservation enabled
             return {
                 'port': self.webdav_default_port,
                 'protocol': self.webdav_default_protocol,
                 'timeoutMinutes': self.webdav_default_timeout,
+                'preserveTimestamps': True,  # NEW: Default to True
             }
 
     def _ensure_internxt_cli_data_dir_exists(self) -> None:

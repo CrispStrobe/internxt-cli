@@ -189,9 +189,10 @@ webdav_api = WebDAVAPIClient()
 class InternxtDAVResource(DAVNonCollection):
     """Represents a file in Internxt Drive for WebDAV access"""
     
-    def __init__(self, path: str, environ: dict, file_metadata: dict):
+    def __init__(self, path: str, environ: dict, file_metadata: dict = None, provider=None):
         super().__init__(path, environ)
-        self.file_metadata = file_metadata
+        self.file_metadata = file_metadata or {}
+        self.provider = provider
         self._upload_buffer = None
         
     def get_content_length(self) -> int:
@@ -226,10 +227,12 @@ class InternxtDAVResource(DAVNonCollection):
     def get_last_modified(self) -> float:
         """Return file modification time as timestamp"""
         try:
-            updated_at = self.file_metadata.get('updatedAt', '')
-            if updated_at:
+            # Priority: modificationTime > updatedAt (SDK-compatible fields)
+            modification_time = self.file_metadata.get('modificationTime') or self.file_metadata.get('updatedAt')
+            
+            if modification_time:
                 from datetime import datetime
-                dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(modification_time.replace('Z', '+00:00'))
                 return dt.timestamp()
         except Exception:
             pass
@@ -331,7 +334,7 @@ class InternxtDAVResource(DAVNonCollection):
         return self._upload_buffer
     
     def end_write(self, with_errors: bool):
-        """Called when writing is complete, with corrected temp file handling for Windows."""
+        """Called when writing is complete, with timestamp preservation support."""
         print(f"🏁 WEBDAV: end_write(with_errors={with_errors}) for {self.path}")
 
         if with_errors or not hasattr(self, '_upload_buffer'):
@@ -361,8 +364,38 @@ class InternxtDAVResource(DAVNonCollection):
 
             # Check if we're updating an existing file or creating a new one
             is_update = (hasattr(self, 'file_metadata') and
-                         self.file_metadata.get('uuid') and
-                         not self.file_metadata.get('uuid', '').startswith('pending-'))
+                        self.file_metadata.get('uuid') and
+                        not self.file_metadata.get('uuid', '').startswith('pending-'))
+
+            # Prepare timestamps if preservation is enabled
+            creation_time = None
+            modification_time = None
+            
+            if hasattr(self, 'provider') and self.provider and hasattr(self.provider, 'preserve_timestamps') and self.provider.preserve_timestamps:
+                try:
+                    from datetime import datetime, timezone
+                    from pathlib import Path
+                    
+                    # Try to extract timestamps from the uploaded file
+                    if self._upload_buffer.using_disk:
+                        # Large file - read timestamps from disk file
+                        file_path = Path(self._upload_buffer.get_path())
+                        stat_info = file_path.stat()
+                        
+                        mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                        modification_time = mtime.isoformat()
+                        
+                        try:
+                            ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                            creation_time = ctime.isoformat()
+                        except AttributeError:
+                            ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                            creation_time = ctime.isoformat()
+                        
+                        print(f"🕐 WEBDAV: Preserving timestamps (large file) - created: {creation_time}, modified: {modification_time}")
+                    
+                except Exception as e:
+                    print(f"⚠️  WEBDAV: Could not extract timestamps: {e}")
 
             # Handle large files uploaded to disk
             if self._upload_buffer.using_disk:
@@ -371,32 +404,65 @@ class InternxtDAVResource(DAVNonCollection):
                 if is_update:
                     result = drive_service.update_file(self.file_metadata['uuid'], file_path)
                 else:
-                    result = drive_service.upload_file_to_folder(file_path, parent_uuid, plain_name, file_type)
+                    result = drive_service.upload_file_to_folder(
+                        file_path, 
+                        parent_uuid, 
+                        plain_name, 
+                        file_type,
+                        creation_time=creation_time,
+                        modification_time=modification_time
+                    )
             
             # Handle small files uploaded from memory
             else:
                 file_data = self._upload_buffer.get_data()
                 print(f"📤 WEBDAV: Uploading small file ({len(file_data)} bytes) from memory")
                 
-                # --- START OF THE FIX ---
                 # Create a temporary file, ensuring it's closed before use.
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_type}' if file_type else '')
                 tmp_file_path = tmp_file.name
                 
                 try:
-                    # Write data and, crucially, close the file to release the lock.
+                    # Write data and close the file to release the lock.
                     tmp_file.write(file_data)
                     tmp_file.close()
+                    
+                    # Extract timestamps from temp file if not already extracted and preservation is enabled
+                    if hasattr(self, 'provider') and self.provider and hasattr(self.provider, 'preserve_timestamps') and self.provider.preserve_timestamps and not modification_time:
+                        try:
+                            from datetime import datetime, timezone
+                            from pathlib import Path
+                            
+                            stat_info = Path(tmp_file_path).stat()
+                            mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                            modification_time = mtime.isoformat()
+                            
+                            try:
+                                ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                creation_time = ctime.isoformat()
+                            except AttributeError:
+                                ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                                creation_time = ctime.isoformat()
+                            
+                            print(f"🕐 WEBDAV: Preserving timestamps (small file) - created: {creation_time}, modified: {modification_time}")
+                        except Exception as e:
+                            print(f"⚠️  WEBDAV: Could not extract timestamps from temp file: {e}")
 
-                    # Now that the file is closed, we can safely pass its path to another function to read it.
+                    # Now that the file is closed, we can safely pass its path to upload
                     if is_update:
                         result = drive_service.update_file(self.file_metadata['uuid'], tmp_file_path)
                     else:
-                        result = drive_service.upload_file_to_folder(tmp_file_path, parent_uuid, plain_name, file_type)
+                        result = drive_service.upload_file_to_folder(
+                            tmp_file_path, 
+                            parent_uuid, 
+                            plain_name, 
+                            file_type,
+                            creation_time=creation_time,
+                            modification_time=modification_time
+                        )
                 finally:
                     # Clean up the temporary file after the upload operation is complete.
                     os.unlink(tmp_file_path)
-                # --- END OF THE FIX ---
             
             print(f"✅ WEBDAV: Upload successful!")
 
@@ -699,12 +765,14 @@ class InternxtDAVCollection(DAVCollection):
         raise DAVError(HTTP_FORBIDDEN, "Folder copying not implemented yet")
     
     def get_creation_date(self) -> float:
-        """Return folder creation time"""
+        """Return file creation time as timestamp"""
         try:
-            created_at = self.folder_metadata.get('createdAt', '')
-            if created_at:
+            # Priority: creationTime > createdAt (SDK-compatible fields)
+            creation_time = self.file_metadata.get('creationTime') or self.file_metadata.get('createdAt')
+            
+            if creation_time:
                 from datetime import datetime
-                dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(creation_time.replace('Z', '+00:00'))
                 return dt.timestamp()
         except Exception:
             pass
@@ -821,8 +889,10 @@ class InternxtDAVCollection(DAVCollection):
 class InternxtDAVProvider(DAVProvider):
     """WebDAV Provider for Internxt Drive"""
     
-    def __init__(self):
+    def __init__(self, preserve_timestamps: bool = True):
         super().__init__()
+        self.preserve_timestamps = preserve_timestamps
+        print(f"🕐 InternxtDAVProvider initialized with timestamp preservation: {preserve_timestamps}")
         self.readonly = False
         
         print("🔍 WEBDAV: Initializing InternxtDAVProvider...")
