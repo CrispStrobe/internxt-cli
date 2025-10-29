@@ -46,13 +46,28 @@ try:
 except ImportError as e:
     print(f"❌ Failed to import services: {e}")
     print("📦 Make sure all service files are in place with fixed implementations")
-    # Check for WebDAV specific dependencies
+    
+    # Check for WebDAV specific dependencies (NEW LOGIC)
     try:
         import wsgidav
-        import cheroot
     except ImportError:
-        print("📦 For WebDAV support, install: pip install WsgiDAV cheroot")
-    sys.exit(1)
+        print("📦 Missing core WebDAV dependency. Install with:")
+        print("   pip install WsgiDAV")
+        sys.exit(1)
+    
+    try:
+        # Check for at least one server, matching webdav_server.py
+        try:
+            import waitress
+        except ImportError:
+            import cheroot
+    except ImportError:
+        print("📦 No suitable WSGI server found. Install one of:")
+        print("   pip install waitress")
+        print("   pip install cheroot")
+        sys.exit(1)
+        
+    sys.exit(1) # Exit from the *original* service import error
 
 
 def format_size(size_bytes: int) -> str:
@@ -226,9 +241,15 @@ def list(folder_id, detailed):
             click.echo(f"\n📁 Folders ({len(folders)}):")
             for folder in folders:
                 name = folder.get('plainName', 'Unknown')
-                created_at = folder.get('createdAt', '')
-                if detailed and created_at:
-                    click.echo(f"  📁 {name} (created {format_date(created_at)})")
+                
+                # Prioritize preserved timestamps
+                display_time_iso = folder.get('modificationTime') or \
+                                   folder.get('creationTime') or \
+                                   folder.get('updatedAt') or \
+                                   folder.get('createdAt', '')
+                
+                if detailed and display_time_iso:
+                    click.echo(f"  📁 {name} (created {format_date(display_time_iso)})")
                 else:
                     click.echo(f"  📁 {name}")
         
@@ -245,12 +266,16 @@ def list(folder_id, detailed):
                 except (ValueError, TypeError):
                     size = 0
                 
-                created_at = file.get('createdAt', '')
+                # Prioritize preserved timestamps
+                display_time_iso = file.get('modificationTime') or \
+                                   file.get('creationTime') or \
+                                   file.get('updatedAt') or \
+                                   file.get('createdAt', '')
                 
                 if detailed:
                     size_str = format_size(size)
-                    if created_at:
-                        click.echo(f"  📄 {name} ({size_str}, created {format_date(created_at)})")
+                    if display_time_iso:
+                        click.echo(f"  📄 {name} ({size_str}, {format_date(display_time_iso)})")
                     else:
                         click.echo(f"  📄 {name} ({size_str})")
                 else:
@@ -674,18 +699,22 @@ def list_path(path: str, detailed: bool, all: bool):
                     creation_time = folder.get('creationTime', 'N/A')
                     modification_time = folder.get('modificationTime', 'N/A')
                     
-                    if created_at != 'N/A':
-                        click.echo(f"     Created At: {format_date(created_at)} ({created_at})")
+                    # Use the correct logic for display
+                    display_creation = creation_time if creation_time != 'N/A' else created_at
+                    display_modification = modification_time if modification_time != 'N/A' else updated_at
+                    
+                    if display_creation != 'N/A':
+                        click.echo(f"     Creation Time: {format_date(display_creation)} ({display_creation})")
                     else:
-                        click.echo(f"     Created At: N/A")
-                    if updated_at != 'N/A':
-                        click.echo(f"     Updated At: {format_date(updated_at)} ({updated_at})")
+                        click.echo(f"     Creation Time: N/A")
+                    
+                    if display_modification != 'N/A':
+                        click.echo(f"     Modification Time: {format_date(display_modification)} ({display_modification})")
                     else:
-                        click.echo(f"     Updated At: N/A")
-                    if creation_time != 'N/A':
-                        click.echo(f"     Creation Time: {format_date(creation_time)} ({creation_time})")
-                    if modification_time != 'N/A':
-                        click.echo(f"     Modification Time: {format_date(modification_time)} ({modification_time})")
+                        click.echo(f"     Modification Time: N/A")
+                    
+                    # Other attributes
+                    click.echo(f"     Deleted: {folder.get('deleted', False)}")
                     
                     # Other attributes
                     click.echo(f"     Deleted: {folder.get('deleted', False)}")
@@ -693,7 +722,7 @@ def list_path(path: str, detailed: bool, all: bool):
                     
                     click.echo()
                 elif detailed:
-                    modified = folder.get('updatedAt', '')[:10] if folder.get('updatedAt') else ''
+                    modified = folder.get('modified', '')[:10] if folder.get('modified') else ''
                     click.echo(f"  📁 {folder['display_name']:<30} {modified:<12} {folder['uuid'][:8]}...")
                 else:
                     click.echo(f"  📁 {folder['display_name']}")
@@ -725,18 +754,19 @@ def list_path(path: str, detailed: bool, all: bool):
                     creation_time = file.get('creationTime', 'N/A')
                     modification_time = file.get('modificationTime', 'N/A')
                     
-                    if created_at != 'N/A':
-                        click.echo(f"     Created At: {format_date(created_at)} ({created_at})")
+                    # Use the correct logic for display
+                    display_creation = creation_time if creation_time != 'N/A' else created_at
+                    display_modification = modification_time if modification_time != 'N/A' else updated_at
+                    
+                    if display_creation != 'N/A':
+                        click.echo(f"     Creation Time: {format_date(display_creation)} ({display_creation})")
                     else:
-                        click.echo(f"     Created At: N/A")
-                    if updated_at != 'N/A':
-                        click.echo(f"     Updated At: {format_date(updated_at)} ({updated_at})")
+                        click.echo(f"     Creation Time: N/A")
+                    
+                    if display_modification != 'N/A':
+                        click.echo(f"     Modification Time: {format_date(display_modification)} ({display_modification})")
                     else:
-                        click.echo(f"     Updated At: N/A")
-                    if creation_time != 'N/A':
-                        click.echo(f"     Creation Time: {format_date(creation_time)} ({creation_time})")
-                    if modification_time != 'N/A':
-                        click.echo(f"     Modification Time: {format_date(modification_time)} ({modification_time})")
+                        click.echo(f"     Modification Time: N/A")
                     
                     # Other attributes
                     click.echo(f"     Deleted: {file.get('deleted', False)}")
@@ -745,7 +775,7 @@ def list_path(path: str, detailed: bool, all: bool):
                     
                     click.echo()
                 elif detailed:
-                    modified = file.get('updatedAt', '')[:10] if file.get('updatedAt') else ''
+                    modified = file.get('modified', '')[:10] if file.get('modified') else ''
                     size = file['size_display']
                     click.echo(f"  📄 {file['display_name']:<30} {size:<10} {modified:<12} {file['uuid'][:8]}...")
                 else:

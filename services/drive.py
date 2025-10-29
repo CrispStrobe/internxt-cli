@@ -177,7 +177,7 @@ class DriveService:
                 'path': full_path,
                 'display_name': folder_name,
                 'size_display': '<DIR>',
-                'modified': folder.get('updatedAt', ''),
+                'modified': folder.get('modificationTime') or folder.get('updatedAt', ''),
             })
         
         enhanced_files = []
@@ -199,7 +199,7 @@ class DriveService:
                 'path': full_path,
                 'display_name': display_name,
                 'size_display': size_display,
-                'modified': file.get('updatedAt', ''),
+                'modified': file.get('modificationTime') or file.get('updatedAt', ''),
             })
         
         return {

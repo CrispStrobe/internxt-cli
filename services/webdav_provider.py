@@ -580,9 +580,10 @@ class InternxtDAVResource(DAVNonCollection):
 class InternxtDAVCollection(DAVCollection):
     """Represents a folder in Internxt Drive for WebDAV access"""
     
-    def __init__(self, path: str, environ: dict, folder_metadata: dict = None):
+    def __init__(self, path: str, environ: dict, folder_metadata: dict = None, provider=None):
         super().__init__(path, environ)
         self.folder_metadata = folder_metadata or {}
+        self.provider = provider
         self._content_cache = None
         self._content_cached_time = 0
         self.CACHE_TIMEOUT = 30
@@ -614,7 +615,7 @@ class InternxtDAVCollection(DAVCollection):
                     child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
                     if VERBOSE_LOGGING:
                         print(f"✅ WEBDAV: Found folder: {name}")
-                    return InternxtDAVCollection(child_path, self.environ, folder)
+                    return InternxtDAVCollection(child_path, self.environ, folder, provider=self.provider)
             
             # Check if it's a file
             for file in content['files']:
@@ -626,7 +627,7 @@ class InternxtDAVCollection(DAVCollection):
                     child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
                     if VERBOSE_LOGGING:
                         print(f"✅ WEBDAV: Found file: {name}")
-                    return InternxtDAVResource(child_path, self.environ, file)
+                    return InternxtDAVResource(child_path, self.environ, file, provider=self.provider)
             
             # Only log if not recently deleted
             child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
@@ -655,7 +656,7 @@ class InternxtDAVCollection(DAVCollection):
         }
         
         child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
-        return InternxtDAVResource(child_path, self.environ, file_metadata)
+        return InternxtDAVResource(child_path, self.environ, file_metadata, provider=self.provider)
     
     def create_collection(self, name: str):
         """Create a new folder"""
@@ -682,7 +683,7 @@ class InternxtDAVCollection(DAVCollection):
             print(f"✅ WEBDAV: Created folder {name} with UUID {new_folder['uuid']}")
             
             child_path = f"{self.path.rstrip('/')}/{name}" if self.path != '/' else f"/{name}"
-            return InternxtDAVCollection(child_path, self.environ, new_folder)
+            return InternxtDAVCollection(child_path, self.environ, new_folder, provider=self.provider)
             
         except Exception as e:
             print(f"❌ WEBDAV: Error creating folder: {e}")
@@ -916,7 +917,8 @@ class InternxtDAVProvider(DAVProvider):
             
             # Root is always a collection
             if path == '/' or path == '':
-                return InternxtDAVCollection(path, environ)
+                # *** FIX: Pass 'provider=self' ***
+                return InternxtDAVCollection(path, environ, provider=self)
             
             # Skip if recently deleted
             if webdav_api.is_recently_deleted(path):
@@ -930,9 +932,13 @@ class InternxtDAVProvider(DAVProvider):
             item_name = path_parts[-1]
             
             # Get parent collection
-            parent_collection = InternxtDAVCollection(parent_path, environ)
+            # *** FIX: Pass 'provider=self' ***
+            parent_collection = InternxtDAVCollection(parent_path, environ, provider=self)
             
             # Try to get the specific member
+            # (The get_member method itself also needs to be fixed
+            # to pass the provider to its children, but this
+            # change ensures 'parent_collection' has the provider)
             member = parent_collection.get_member(item_name)
             if member:
                 return member

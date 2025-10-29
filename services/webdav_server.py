@@ -141,8 +141,9 @@ class WebDAVServer:
         """
         try:
             from wsgidav.wsgidav_app import WsgiDAVApp
-            from cheroot import wsgi
             from services.webdav_provider import InternxtDAVProvider
+            # Import for SSL
+            from services.network_utils import NetworkUtils
             
             # Get configuration
             webdav_config = config_service.read_webdav_config()
@@ -153,7 +154,7 @@ class WebDAVServer:
             protocol = webdav_config.get('protocol', 'http')
             
             # Create provider with timestamp preservation setting
-            provider = InternxtDAVProvider(preserve_timestamps=preserve_timestamps)  # NEW: Pass flag
+            provider = InternxtDAVProvider(preserve_timestamps=preserve_timestamps)
             
             # Configure WsgiDAV
             config = {
@@ -162,7 +163,7 @@ class WebDAVServer:
                 "provider_mapping": {"/": provider},
                 "simple_dc": {"user_mapping": {"*": {"internxt": {"password": "internxt-webdav"}}}},
                 "verbose": 1,
-                "enable_loggers": [],
+                # "enable_loggers": [], # <-- REMOVED deprecated key
                 "logging": {
                     "enable": True,
                     "enable_loggers": ["wsgidav"],
@@ -170,32 +171,84 @@ class WebDAVServer:
             }
             
             # Create WSGI application
-            app = WsgiDAVApp(config)
+            # Use self.app so it's available to other methods if needed
+            self.app = WsgiDAVApp(config) 
             
-            # Start server
+            # Determine server URL
             server_url = f"{protocol}://localhost:{port}/"
             
             if background:
                 # Background mode handled by CLI command
                 pass
             
-            # Create and start server
-            server = wsgi.Server(
-                bind_addr=("0.0.0.0", port),
-                wsgi_app=app,
-            )
+            # --- NEW SERVER AND SSL LOGIC ---
             
-            print(f"✅ WebDAV server started successfully")
+            # SSL Configuration
+            ssl_adapter = None
+            if protocol.lower() == 'https':
+                try:
+                    cert_path = NetworkUtils.WEBDAV_SSL_CERT_FILE
+                    key_path = NetworkUtils.WEBDAV_SSL_KEY_FILE
+                    if not cert_path.exists() or not key_path.exists():
+                        print("🔐 SSL certs not found, generating new ones...")
+                        NetworkUtils.generate_new_selfsigned_certs()
+                    
+                    if WSGI_SERVER == 'cheroot':
+                        from cheroot.ssl.builtin import BuiltinSSLAdapter
+                        ssl_adapter = BuiltinSSLAdapter(str(cert_path), str(key_path))
+                        print(f"🔐 SSL (Cheroot) enabled: {cert_path}")
+                    elif WSGI_SERVER == 'waitress':
+                        print(f"🔐 SSL (Waitress) enabled: {cert_path}")
+                    
+                except Exception as e:
+                    print(f"⚠️  SSL failed to initialize, falling back to HTTP: {e}")
+                    server_url = f"http://localhost:{port}/" # Fallback
+                    protocol = 'http'
+                    ssl_adapter = None
+            
+            print(f"✅ WebDAV server starting...")
             print(f"🌐 URL: {server_url}")
             print(f"👤 Username: internxt")
             print(f"🔑 Password: internxt-webdav")
             print(f"🕐 Timestamp Preservation: {'Enabled' if preserve_timestamps else 'Disabled'}")
+            print(f"🚀 Using server: {WSGI_SERVER}")
+
+            if WSGI_SERVER == 'waitress':
+                from waitress import serve
+                
+                # Waitress SSL is passed as arguments
+                if protocol.lower() == 'https':
+                    serve(
+                        self.app,
+                        host="0.0.0.0",
+                        port=port,
+                        ssl_certificate=str(NetworkUtils.WEBDAV_SSL_CERT_FILE),
+                        ssl_private_key=str(NetworkUtils.WEBDAV_SSL_KEY_FILE),
+                    )
+                else:
+                    serve(
+                        self.app,
+                        host="0.0.0.0",
+                        port=port,
+                    )
+                    
+            elif WSGI_SERVER == 'cheroot':
+                from cheroot import wsgi
+                server = wsgi.Server(
+                    bind_addr=("0.0.0.0", port),
+                    wsgi_app=self.app,
+                )
+                
+                # Apply SSL adapter if it was created
+                if ssl_adapter:
+                    server.ssl_adapter = ssl_adapter
+                    
+                self._server = server # Store server instance
+                server.start() # Start serving
             
-            # Store server instance
-            self._server = server
-            
-            # Start serving
-            server.start()
+            else:
+                # This case should be caught by the import check at the top
+                raise RuntimeError("No valid WSGI server found.")
             
             return {
                 "success": True,
