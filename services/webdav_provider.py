@@ -22,7 +22,7 @@ except ImportError:
 
 # Configuration
 MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100MB - files larger than this use disk
-VERBOSE_LOGGING = False  # Set to True for detailed logging
+VERBOSE_LOGGING = True  # Set to True for detailed logging
 
 
 class StreamingFileUpload:
@@ -918,7 +918,7 @@ class InternxtDAVProvider(DAVProvider):
             # Root is always a collection
             if path == '/' or path == '':
                 # *** FIX: Pass 'provider=self' ***
-                return InternxtDAVCollection(path, environ, provider=self)
+                return InternxtDAVCollection(path=path, environ=environ, provider=self)
             
             # Skip if recently deleted
             if webdav_api.is_recently_deleted(path):
@@ -932,8 +932,7 @@ class InternxtDAVProvider(DAVProvider):
             item_name = path_parts[-1]
             
             # Get parent collection
-            # *** FIX: Pass 'provider=self' ***
-            parent_collection = InternxtDAVCollection(parent_path, environ, provider=self)
+            parent_collection = InternxtDAVCollection(path=parent_path, environ=environ, provider=self)
             
             # Try to get the specific member
             # (The get_member method itself also needs to be fixed

@@ -127,7 +127,7 @@ class WebDAVServer:
         return WsgiDAVApp(config)
     
     def start(self, port: Optional[int] = None, background: bool = False, 
-            preserve_timestamps: bool = True) -> Dict[str, Any]:
+            preserve_timestamps: bool = True, server_choice: str = 'auto') -> Dict[str, Any]: 
         """
         Start the WebDAV server
         
@@ -181,18 +181,41 @@ class WebDAVServer:
                 # Background mode handled by CLI command
                 pass
             
-            # --- NEW SERVER AND SSL LOGIC ---
+            # ---ssl_adapter = None SERVER AND SSL LOGIC ---
+
+            # WSGI_SERVER (global) is our 'auto' default
+            # We only override if the user forces a choice.
+            
+            if server_choice == 'waitress':
+                try:
+                    from waitress import serve
+                    active_server = 'waitress'
+                except ImportError:
+                    raise ImportError("Server choice 'waitress' is not installed. Run: pip install waitress")
+            
+            elif server_choice == 'cheroot':
+                try:
+                    from cheroot import wsgi
+                    active_server = 'cheroot'
+                except ImportError:
+                    raise ImportError("Server choice 'cheroot' is not installed. Run: pip install cheroot")
+            
+            elif server_choice == 'auto':
+                active_server = WSGI_SERVER # Use the globally-detected one
+            
+            if active_server is None:
+                 raise ImportError("No suitable WSGI server found. Install 'waitress' or 'cheroot'")
             
             # SSL Configuration
             ssl_adapter = None
             if protocol.lower() == 'https':
                 try:
-                    if WSGI_SERVER == 'waitress':
+                    if active_server == 'waitress':
                         print(f"⚠️  Warning: SSL (HTTPS) is not supported with the 'waitress' server.")
                         print(f"   Serving over HTTP instead.")
                         protocol = 'http'
                         server_url = f"http://localhost:{port}/" # Fallback to HTTP
-                    elif WSGI_SERVER == 'cheroot':
+                    elif active_server == 'cheroot':
                         cert_path = NetworkUtils.WEBDAV_SSL_CERT_FILE
                         key_path = NetworkUtils.WEBDAV_SSL_KEY_FILE
                         if not cert_path.exists() or not key_path.exists():
@@ -214,9 +237,9 @@ class WebDAVServer:
             print(f"👤 Username: internxt")
             print(f"🔑 Password: internxt-webdav")
             print(f"🕐 Timestamp Preservation: {'Enabled' if preserve_timestamps else 'Disabled'}")
-            print(f"🚀 Using server: {WSGI_SERVER}")
+            print(f"🚀 Using server: {active_server}")
 
-            if WSGI_SERVER == 'waitress':
+            if active_server == 'waitress':
                 from waitress import serve
                 
                 # Waitress SSL is passed as arguments
@@ -235,7 +258,7 @@ class WebDAVServer:
                         port=port,
                     )
                     
-            elif WSGI_SERVER == 'cheroot':
+            elif active_server == 'cheroot':
                 from cheroot import wsgi
                 server = wsgi.Server(
                     bind_addr=("0.0.0.0", port),

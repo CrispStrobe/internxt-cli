@@ -1252,7 +1252,10 @@ def delete_permanently_by_path(path: str, force: bool):
 @click.option('--background', '-b', is_flag=True, help='Run server in background')
 @click.option('--show-mount', is_flag=True, help='Show mount instructions')
 @click.option('--no-preserve-timestamps', is_flag=True, help='Do NOT preserve file timestamps (preserves by default)')
-def webdav_start(port: Optional[int], background: bool, show_mount: bool, no_preserve_timestamps: bool):
+@click.option('--server', 'server_choice', type=click.Choice(['auto', 'waitress', 'cheroot'], case_sensitive=False), 
+              default='auto', help='Force a specific server (default: auto-detect)')
+def webdav_start(port: Optional[int], background: bool, show_mount: bool, 
+                 no_preserve_timestamps: bool, server_choice: str): 
     """
     Start WebDAV server to mount Internxt Drive as a local drive.
     
@@ -1298,6 +1301,8 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool, no_pre
                 cmd.extend(['--port', str(port)])
             if no_preserve_timestamps:
                 cmd.append('--no-preserve-timestamps')
+            if server_choice != 'auto':
+                cmd.extend(['--server', server_choice])
             # Don't pass --background to avoid infinite recursion
             
             # Check if already running
@@ -1356,7 +1361,8 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool, no_pre
         result = webdav_server.start(
             port=int(webdav_config['port']),
             background=False,
-            preserve_timestamps=webdav_config['preserveTimestamps']  # NEW: Pass to server
+            preserve_timestamps=webdav_config['preserveTimestamps'],
+            server_choice=server_choice
         )
         
         if result['success']:
