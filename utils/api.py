@@ -12,10 +12,9 @@ from typing import Dict, Any, Optional
 
 from config.config import config_service
 
-
 class ApiClient:
     """
-    HTTP client for Internxt API based on actual SDK endpoints
+    HTTP client for Internxt API
     """
 
     def __init__(self):
@@ -118,13 +117,20 @@ class ApiClient:
         params = {'offset': offset, 'limit': limit, 'sort': 'plainName', 'direction': 'ASC'}
         return self.get(url, params)
 
-    def create_folder(self, plain_name: str, parent_folder_uuid: str) -> Dict[str, Any]:
-        """Create new folder using UUID-based endpoint"""
+    def create_folder(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create new folder using a full payload (for timestamp support)
+        Real SDK: POST /folders
+        """
         url = f"{self.drive_api_url}/folders"
-        data = {'plainName': plain_name, 'parentFolderUuid': parent_folder_uuid}
-        return self.post(url, data)
+        # Ensure 'plainName' and 'parentFolderUuid' are in payload,
+        # but also allow 'creationTime', 'modificationTime', etc.
+        if 'plainName' not in payload or 'parentFolderUuid' not in payload:
+             raise ValueError("create_folder payload must include 'plainName' and 'parentFolderUuid'")
+        
+        return self.post(url, data=payload)
 
-    # ========== METADATA OPERATIONS (CORRECTED) ==========
+    # ========== METADATA OPERATIONS ==========
     
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
         """Get file metadata"""
@@ -234,11 +240,7 @@ class ApiClient:
         url = f"{self.drive_api_url}/storage/trash/add"
         return self.post(url, data=payload)
 
-    # ========== NO COPY OPERATIONS ==========
-    # The real SDK doesn't have server-side copy operations
-    # So our drive service fallback (download + re-upload) is correct
-
-    # ========== TRASH MANAGEMENT (CORRECTED) ==========
+    # ========== TRASH MANAGEMENT ==========
     
     def get_trash_content(self, offset: int = 0, limit: int = 50, item_type: str = 'both') -> Dict[str, Any]:
         """
@@ -299,7 +301,7 @@ class ApiClient:
         params = {'path': file_path}
         return self.get(url, params)
 
-    # ========== NETWORK API ENDPOINTS (CORRECTED) ==========
+    # ========== NETWORK API ENDPOINTS ==========
     
     def start_upload(self, bucket_id: str, file_size: int, auth: tuple) -> Dict[str, Any]:
         """

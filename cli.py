@@ -362,6 +362,8 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
 
     try:
         credentials = auth_service.get_auth_details()
+        click.echo("🔄 Refreshing authentication token...")
+        auth_service.get_auth_details()
         click.echo(f"🎯 Preparing upload to remote path: {target_path}")
 
         # --- Resolve or Create Target Folder ---
@@ -477,9 +479,7 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                     
                     if preserve_timestamps:
                         try:
-                            stat_info = local_path.stat()
-                            from datetime import datetime, timezone
-                            
+                            stat_info = local_path.stat()                            
                             mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
                             modification_time = mtime.isoformat()
                             
@@ -519,21 +519,103 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                             click.echo(f"  -> Skipping already processed directory: {local_path}")
                         continue
 
-                    if not recursive:
-                        click.echo(f"⚠️ Skipping directory (use -r to upload recursively): {local_path}")
-                        skipped_count += 1
-                        continue
-
                     click.echo(f"📂 Processing directory recursively: {local_path}")
                     processed_dirs.add(local_path)
 
+                    # Create the root upload dir first, with timestamps
                     if copy_contents_only:
                         click.echo(f"  ✨ Copying contents directly to target (trailing slash detected)")
                         dir_remote_base_path = Path(target_folder_path_str)
                     else:
-                        click.echo(f"  📁 Creating folder '{local_path.name}' in target")
+                        click.echo(f"  📁 Ensuring folder '{local_path.name}' exists in target...")
                         dir_remote_base_path = Path(target_folder_path_str) / local_path.name
+                        
+                        # Get timestamps for THIS directory
+                        creation_time, modification_time = None, None
+                        if preserve_timestamps:
+                            try:
+                                stat_info = local_path.stat()
+                                mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                                modification_time = mtime.isoformat()
+                                try:
+                                    ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                    creation_time = ctime.isoformat()
+                                except AttributeError:
+                                    ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                                    creation_time = ctime.isoformat()
+                                if verbose:
+                                     click.echo(f"  🕐 Applying root dir timestamps: Mod={modification_time}")
+                            except Exception as e:
+                                if verbose:
+                                    click.echo(f"  ⚠️  Could not read root dir timestamps: {e}")
 
+                        # Create the root folder WITH timestamps
+                        try:
+                            # We must use str() for the path and normalize separators
+                            drive_service.create_folder_recursive(
+                                str(dir_remote_base_path).replace(os.sep, '/'),
+                                creation_time=creation_time,
+                                modification_time=modification_time
+                            )
+                        except Exception as create_err:
+                            click.echo(f"     ❌ Error creating root folder {local_path.name}: {create_err}", err=True)
+                            error_count += 1
+                            continue # Skip this whole directory
+
+                    click.echo(f"  -> Pass 1/2: Creating subdirectory structure...")
+                    
+                    # --- FIRST PASS: CREATE SUB-DIRECTORIES ---
+                    dir_list = []
+                    for item in local_path.rglob('*'):
+                        if item.is_dir():
+                            dir_list.append(item)
+                    
+                    dir_list.sort(key=lambda x: len(x.parts))
+                    
+                    for item in dir_list:
+                        if not drive_service.should_include_file(item, include_patterns, exclude_patterns):
+                            if verbose: click.echo(f"  -> 🚫 Filtered dir: {item.name}")
+                            filtered_count += 1
+                            continue
+                        
+                        relative_path = item.relative_to(local_path)
+                        item_target_path = dir_remote_base_path / relative_path
+                        item_target_path_str = str(item_target_path).replace(os.sep, '/')
+                        if not item_target_path_str.startswith('/'):
+                            item_target_path_str = '/' + item_target_path_str
+
+                        # Get directory timestamps
+                        creation_time, modification_time = None, None
+                        if preserve_timestamps:
+                            try:
+                                stat_info = item.stat()
+                                mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
+                                modification_time = mtime.isoformat()
+                                try:
+                                    ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                    creation_time = ctime.isoformat()
+                                except AttributeError:
+                                    ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
+                                    creation_time = ctime.isoformat()
+                            except Exception:
+                                pass # Failed to get timestamps
+
+                        try:
+                            if verbose:
+                                click.echo(f"  -> 📁 Ensuring dir: {item_target_path_str}")
+                            
+                            drive_service.create_folder_recursive(
+                                item_target_path_str,
+                                creation_time=creation_time,
+                                modification_time=modification_time
+                            )
+                        except Exception as create_err:
+                            click.echo(f"     ❌ Error creating dir {item_target_path_str}: {create_err}", err=True)
+                            error_count += 1
+
+                    click.echo(f"  -> Pass 2/2: Uploading files...")
+                    
+                    # --- SECOND PASS: UPLOAD FILES ---
                     for item in local_path.rglob('*'):
                         if item.is_file():
                             # Apply include/exclude filters
@@ -545,7 +627,7 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                             
                             relative_path = item.relative_to(local_path)
                             item_target_parent_path = dir_remote_base_path / relative_path.parent
-                            item_target_parent_path_str = str(item_target_parent_path).replace('\\', '/')
+                            item_target_parent_path_str = str(item_target_parent_path).replace(os.sep, '/')
                             if not item_target_parent_path_str.startswith('/'):
                                 item_target_parent_path_str = '/' + item_target_parent_path_str
 
@@ -555,6 +637,8 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
 
                             parent_folder_uuid = None
                             try:
+                                # This call will now be very fast as dirs exist
+                                # And we call it *without* timestamps, as the dir is already made
                                 parent_folder = drive_service.create_folder_recursive(item_target_parent_path_str)
                                 parent_folder_uuid = parent_folder['uuid']
                                 if verbose:
@@ -570,7 +654,6 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                             if preserve_timestamps:
                                 try:
                                     stat_info = item.stat()
-                                    from datetime import datetime, timezone
                                     mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
                                     modification_time = mtime.isoformat()
                                     try:
@@ -579,7 +662,9 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
                                     except AttributeError:
                                         ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
                                         creation_time = ctime.isoformat()
-                                except Exception:
+                                except Exception as e:
+                                    # This will tell us why timestamp reading is failing
+                                    click.echo(f"  -> ⚠️  Could not read timestamps for {item.name}: {e}", err=True)
                                     pass
 
                             upload_result = drive_service.upload_single_item_with_conflict_handling(
@@ -953,6 +1038,23 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
                     folder_name = folder_info.get('plainName', folder_info.get('name', ''))
                     subfolder_dest = current_dest / folder_name
                     subfolder_dest.mkdir(parents=True, exist_ok=True)
+                    
+                    if preserve_timestamps:
+                        try:
+                            # Get modification time (preferred) or creation time
+                            mod_time_iso = folder_info.get('modificationTime') or folder_info.get('updatedAt')
+                            
+                            if mod_time_iso:
+                                dt = datetime.fromisoformat(mod_time_iso.replace('Z', '+00:00'))
+                                mtime_ts = dt.timestamp()
+                                
+                                # Set access and modification times
+                                os.utime(subfolder_dest, (mtime_ts, mtime_ts))
+                                if verbose:
+                                    click.echo(f"  -> 🕐 Set folder timestamp for: {folder_name}")
+                        except Exception as e:
+                            if verbose:
+                                click.echo(f"  -> ⚠️  Could not set timestamp for {folder_name}: {e}")
                     
                     if verbose:
                         click.echo(f"📂 Entering folder: {folder_name}")

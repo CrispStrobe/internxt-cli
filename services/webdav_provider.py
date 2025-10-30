@@ -117,8 +117,51 @@ class WebDAVAPIClient:
         self._api_client = None
         self._thread_local = threading.local()
         self._deleted_items = set()  # Track recently deleted items
-        
+
+    # services/webdav_provider.py (Fixed)
+
     def _get_isolated_session(self):
+        """Get a thread-local API session"""
+        if not hasattr(self._thread_local, 'api_client'):
+            if VERBOSE_LOGGING:
+                print("🔍 WEBDAV: Creating fresh API session for WebDAV thread")
+            
+            from services.auth import auth_service
+            from utils.api import ApiClient
+            
+            # We refresh the tokens first.
+            # The WebDAV thread is separate from the main
+            # CLI, so its tokens will be stale.
+            try:
+                if VERBOSE_LOGGING:
+                    print("🔍 WEBDAV: Forcing token refresh for new session...")
+                auth_service.refresh_tokens()
+                if VERBOSE_LOGGING:
+                    print("✅ WEBDAV: Token refresh successful.")
+            except Exception as e:
+                # If refresh fails, we'll have to try with stale tokens
+                if VERBOSE_LOGGING:
+                    print(f"⚠️  WEBDAV: Token refresh failed ({e}), proceeding anyway...")
+
+            # Now get the (hopefully) fresh details
+            self._credentials = auth_service.get_auth_details()
+            
+            # Create a new "dumb" client
+            fresh_api_client = ApiClient()
+            
+            # Inject the fresh tokens
+            fresh_api_client.set_auth_tokens(
+                self._credentials.get('token'), 
+                self._credentials.get('newToken')
+            )
+            
+            self._thread_local.api_client = fresh_api_client
+            if VERBOSE_LOGGING:
+                print("✅ WEBDAV: Fresh API session created")
+            
+        return self._thread_local.api_client
+        
+    def _get_isolated_session_without_token_refresh(self):
         """Get a thread-local API session"""
         if not hasattr(self._thread_local, 'api_client'):
             if VERBOSE_LOGGING:
@@ -688,6 +731,50 @@ class InternxtDAVCollection(DAVCollection):
         except Exception as e:
             print(f"❌ WEBDAV: Error creating folder: {e}")
             raise DAVError(HTTP_FORBIDDEN, f"Could not create folder: {e}")
+        
+    def set_property(self, name, value, depth="0"):
+        """Set a property (called by PROPPATCH)."""
+        from services.drive import drive_service
+        from wsgidav.util import rfc_1123_to_timestamp, rfc_3339_to_timestamp
+        from datetime import datetime, timezone
+
+        print(f"🔍 WEBDAV: PROPPATCH set_property('{name}', '{value}')")
+
+        if name in ("{DAV:}creationdate", "{urn:schemas-microsoft-com:}creationdate"):
+            # Not all clients support setting this, but we try
+            try:
+                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                iso_timestamp = dt.isoformat()
+                drive_service.set_folder_timestamps(
+                    self.folder_metadata['uuid'], 
+                    creation_time=iso_timestamp
+                )
+            except Exception as e:
+                print(f"❌ WEBDAV: Error setting creationdate: {e}")
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set creation date")
+        
+        elif name in ("{DAV:}getlastmodified", "{urn:schemas-microsoft-com:}Win32LastModifiedTime"):
+            try:
+                # Timestamps can come in different formats
+                try:
+                    ts = rfc_1123_to_timestamp(value)
+                except ValueError:
+                    ts = rfc_3339_to_timestamp(value)
+                
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                iso_timestamp = dt.isoformat()
+                
+                drive_service.set_folder_timestamps(
+                    self.folder_metadata['uuid'], 
+                    modification_time=iso_timestamp
+                )
+            except Exception as e:
+                print(f"❌ WEBDAV: Error setting getlastmodified: {e}")
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set modification date")
+        
+        else:
+            print(f"⚠️  WEBDAV: Ignored set_property for '{name}'")
+            super().set_property(name, value, depth)
     
     def delete(self):
         """Delete this folder"""
@@ -777,7 +864,7 @@ class InternxtDAVCollection(DAVCollection):
                 return dt.timestamp()
         except Exception:
             pass
-        return time.time()
+        return super().get_creation_date() # Fallback
     
     def get_last_modified(self) -> float:
         """Return folder modification time"""
@@ -789,7 +876,7 @@ class InternxtDAVCollection(DAVCollection):
                 return dt.timestamp()
         except Exception:
             pass
-        return time.time()
+        return super().get_last_modified() # Fallback
     
     def get_etag(self) -> str:
         """Return ETag for the folder resource - FIXED: no extra quotes"""

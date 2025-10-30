@@ -725,20 +725,37 @@ class DriveService:
             print(f"Warning: Failed to get files: {e}")
             return []
 
-    def create_folder(self, name: str, parent_folder_uuid: str = None) -> Dict[str, Any]:
-        """Create new folder"""
+    def create_folder(self, name: str, parent_folder_uuid: str = None,
+                      creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
+        """Create new folder with optional timestamps"""
         credentials = self.auth.get_auth_details()
 
         if not parent_folder_uuid:
             parent_folder_uuid = credentials['user'].get('rootFolderId', '')
             if not parent_folder_uuid:
                 raise ValueError("No root folder ID found")
+        
+        # Build payload for the new api.create_folder
+        payload = {
+            'plainName': name,
+            'parentFolderUuid': parent_folder_uuid
+        }
 
-        return self.api.create_folder(name, parent_folder_uuid)
+        if creation_time:
+            payload['creationTime'] = creation_time
+            print(f"     🕐 Adding folder creationTime: {creation_time}")
+        if modification_time:
+            payload['modificationTime'] = modification_time
+            print(f"     🕐 Adding folder modificationTime: {modification_time}")
 
-    def create_folder_recursive(self, path: str) -> Dict[str, Any]:
+        # This now calls the modified api.create_folder(payload)
+        return self.api.create_folder(payload)
+
+    def create_folder_recursive(self, path: str,
+                              creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
         """
         Ensures a folder path exists, creating intermediate folders if necessary.
+        Sets timestamps *only* if the folder is being created new.
         Returns the metadata of the final folder.
         """
         credentials = self.auth.get_auth_details()
@@ -746,113 +763,171 @@ class DriveService:
 
         path = path.strip().strip('/')
         if not path:
-             # Request is for the root folder itself
              return {'uuid': root_folder_uuid, 'plainName': 'Root'}
 
-        parts = path.split('/')
+        parts = [part for part in path.split('/') if part] # Clean empty parts
         current_parent_uuid = root_folder_uuid
         current_path_so_far = "/"
+        final_folder_info = None
 
         for i, part in enumerate(parts):
-            if not part: continue # Skip empty parts resulting from //
-
+            is_last_part = (i == len(parts) - 1)
             found_folder = None
+            
             try:
-                # Check if the folder already exists within the current parent
+                # 1. Check if the folder already exists
                 content = self.get_folder_content(current_parent_uuid)
                 for folder in content['folders']:
-                    if folder.get('plainName') == part:
+                    if folder.get('plainName') == part or folder.get('name') == part:
                         found_folder = folder
                         break
 
                 if found_folder:
+                    # 2. FOLDER EXISTS: We cannot update its timestamp.
+                    # Just use its info and move to the next part.
                     current_parent_uuid = found_folder['uuid']
-                    current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
+                    final_folder_info = found_folder
+                    
+                    if is_last_part and (creation_time or modification_time):
+                        print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
+                
                 else:
-                    # Folder doesn't exist, create it
-                    print(f"  -> Creating intermediate folder: {part} in {current_path_so_far}")
-                    new_folder = self.api.create_folder(part, current_parent_uuid)
-                    current_parent_uuid = new_folder['uuid']
-                    current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
-                    found_folder = new_folder # Use the newly created folder info
+                    # 3. FOLDER DOES NOT EXIST: Create it new.
+                    try:
+                        print(f"  -> Creating new folder: {part} in {current_path_so_far}")
+                        
+                        # We only pass timestamps if this is the *final* folder
+                        if is_last_part:
+                            print(f"  -> 🕐 Applying timestamps to new folder: {part}")
+                            new_folder = self.create_folder(
+                                part, 
+                                current_parent_uuid,
+                                creation_time=creation_time,
+                                modification_time=modification_time
+                            )
+                        else:
+                            # Create intermediate folders *without* timestamps
+                            new_folder = self.api.create_folder({
+                                'plainName': part, 
+                                'parentFolderUuid': current_parent_uuid
+                            })
+                        
+                        current_parent_uuid = new_folder['uuid']
+                        final_folder_info = new_folder
+                    
+                    except Exception as e:
+                        # Handle the race condition we saw before
+                        if "already exists" in str(e):
+                            print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Resolving...")
+                            try:
+                                existing_folder_path = f"{current_path_so_far.rstrip('/')}/{part}"
+                                resolved = self.resolve_path(existing_folder_path)
+                                current_parent_uuid = resolved['uuid']
+                                final_folder_info = resolved['metadata']
+                            except Exception as e2:
+                                raise Exception(f"Failed to create folder '{part}' and could not resolve it after: {e2}")
+                        else:
+                            raise e # Re-raise other errors
 
-                # If this is the last part, return its metadata
-                if i == len(parts) - 1:
-                    return found_folder
+                current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
+                
+                # If this is the last part, return the info we found or created
+                if is_last_part:
+                    return final_folder_info
 
             except Exception as e:
                  raise Exception(f"Failed to resolve or create folder part '{part}' in '{current_path_so_far}': {e}")
 
-        # Should not be reached if path has parts, but return root if path was empty
         return {'uuid': root_folder_uuid, 'plainName': 'Root'}
 
-    def upload_file(self, file_path_str: str, destination_folder_uuid: str = None):
-        """Upload file with encryption"""
+    def create_folder_recursive(self, path: str,
+                              creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
+        """
+        Ensures a folder path exists, creating intermediate folders if necessary.
+        Sets timestamps *only* if the folder is being created new.
+        Returns the metadata of the final folder.
+        """
         credentials = self.auth.get_auth_details()
-        user = credentials['user']
-        bucket_id = user['bucket']
-        mnemonic = user['mnemonic']
-        network_auth = self._get_network_auth(user)
+        root_folder_uuid = credentials['user'].get('rootFolderId', '')
 
-        if not destination_folder_uuid:
-            destination_folder_uuid = user['rootFolderId']
+        path = path.strip().strip('/')
+        if not path:
+             return {'uuid': root_folder_uuid, 'plainName': 'Root'}
 
-        file_path = Path(file_path_str)
-        if not file_path.is_file():
-            raise FileNotFoundError(f"File not found at: {file_path}")
+        parts = [part for part in path.split('/') if part] # Clean empty parts
+        current_parent_uuid = root_folder_uuid
+        current_path_so_far = "/"
+        final_folder_info = None
 
-        file_size = file_path.stat().st_size
-        if file_size > self.TWENTY_GIGABYTES:
-            raise ValueError("File is too large (must be less than 20 GB)")
-        
-        print(f"📤 Uploading '{file_path.name}' ...")
-        
-        with open(file_path, 'rb') as f:
-            plaintext = f.read()
-        
-        with tqdm(total=5, desc="Uploading", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
-            pbar.set_description("🔐 Encrypting with exact protocol")
-            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(plaintext, mnemonic, bucket_id)
-            pbar.update(1)
-
-            pbar.set_description("🚀 Initializing network upload")
-            start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
-            upload_details = start_response['uploads'][0]
-            upload_url = upload_details['url']
-            file_network_uuid = upload_details['uuid']
-            pbar.update(1)
-
-            pbar.set_description("☁️  Uploading encrypted data")
-            self.api.upload_chunk(upload_url, encrypted_data)
-            pbar.update(1)
-
-            pbar.set_description("✅ Finalizing network upload")
-            encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+        for i, part in enumerate(parts):
+            is_last_part = (i == len(parts) - 1)
+            found_folder = None
             
-            finish_payload = {
-                'index': file_index_hex,
-                'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
-            }
-            finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
-            network_file_id = finish_response['id']
-            pbar.update(1)
+            try:
+                # 1. Check if the folder already exists
+                content = self.get_folder_content(current_parent_uuid)
+                for folder in content['folders']:
+                    if folder.get('plainName') == part or folder.get('name') == part:
+                        found_folder = folder
+                        break
 
-            pbar.set_description("📋 Creating file metadata")
-            file_entry_payload = {
-                'folderUuid': destination_folder_uuid,
-                'plainName': file_path.stem,
-                'type': file_path.suffix.lstrip('.') if file_path.suffix else '',
-                'size': file_size,
-                'bucket': bucket_id,
-                'fileId': network_file_id,
-                'encryptVersion': 'Aes03',
-                'name': ''
-            }
-            created_file = self.api.create_file_entry(file_entry_payload)
-            pbar.update(1)
-        
-        print(f"✅ Success! File '{created_file.get('plainName')}' uploaded with UUID: {created_file.get('uuid')}")
-        return created_file
+                if found_folder:
+                    # 2. FOLDER EXISTS: We cannot update its timestamp.
+                    # Just use its info and move to the next part.
+                    current_parent_uuid = found_folder['uuid']
+                    final_folder_info = found_folder
+                    
+                    if is_last_part and (creation_time or modification_time):
+                        print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
+                
+                else:
+                    # 3. FOLDER DOES NOT EXIST: Create it new.
+                    try:
+                        print(f"  -> Creating new folder: {part} in {current_path_so_far}")
+                        
+                        # We only pass timestamps if this is the *final* folder
+                        if is_last_part:
+                            print(f"  -> 🕐 Applying timestamps to new folder: {part}")
+                            new_folder = self.create_folder(
+                                part, 
+                                current_parent_uuid,
+                                creation_time=creation_time,
+                                modification_time=modification_time
+                            )
+                        else:
+                            # Create intermediate folders *without* timestamps
+                            new_folder = self.api.create_folder({
+                                'plainName': part, 
+                                'parentFolderUuid': current_parent_uuid
+                            })
+                        
+                        current_parent_uuid = new_folder['uuid']
+                        final_folder_info = new_folder
+                    
+                    except Exception as e:
+                        # Handle the race condition we saw before
+                        if "already exists" in str(e):
+                            print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Resolving...")
+                            try:
+                                existing_folder_path = f"{current_path_so_far.rstrip('/')}/{part}"
+                                resolved = self.resolve_path(existing_folder_path)
+                                current_parent_uuid = resolved['uuid']
+                                final_folder_info = resolved['metadata']
+                            except Exception as e2:
+                                raise Exception(f"Failed to create folder '{part}' and could not resolve it after: {e2}")
+                        else:
+                            raise e # Re-raise other errors
+
+                current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
+                
+                # If this is the last part, return the info we found or created
+                if is_last_part:
+                    return final_folder_info
+
+            except Exception as e:
+                 raise Exception(f"Failed to resolve or create folder part '{part}' in '{current_path_so_far}': {e}")
+
+        return {'uuid': root_folder_uuid, 'plainName': 'Root'}
     
     def validate_upload_sources(self, sources: List[str], recursive: bool = False) -> Tuple[List[Path], List[str]]:
         """
