@@ -187,18 +187,21 @@ class WebDAVServer:
             ssl_adapter = None
             if protocol.lower() == 'https':
                 try:
-                    cert_path = NetworkUtils.WEBDAV_SSL_CERT_FILE
-                    key_path = NetworkUtils.WEBDAV_SSL_KEY_FILE
-                    if not cert_path.exists() or not key_path.exists():
-                        print("🔐 SSL certs not found, generating new ones...")
-                        NetworkUtils.generate_new_selfsigned_certs()
-                    
-                    if WSGI_SERVER == 'cheroot':
+                    if WSGI_SERVER == 'waitress':
+                        print(f"⚠️  Warning: SSL (HTTPS) is not supported with the 'waitress' server.")
+                        print(f"   Serving over HTTP instead.")
+                        protocol = 'http'
+                        server_url = f"http://localhost:{port}/" # Fallback to HTTP
+                    elif WSGI_SERVER == 'cheroot':
+                        cert_path = NetworkUtils.WEBDAV_SSL_CERT_FILE
+                        key_path = NetworkUtils.WEBDAV_SSL_KEY_FILE
+                        if not cert_path.exists() or not key_path.exists():
+                            print("🔐 SSL certs not found, generating new ones...")
+                            NetworkUtils.generate_new_selfsigned_certs()
+                        
                         from cheroot.ssl.builtin import BuiltinSSLAdapter
                         ssl_adapter = BuiltinSSLAdapter(str(cert_path), str(key_path))
                         print(f"🔐 SSL (Cheroot) enabled: {cert_path}")
-                    elif WSGI_SERVER == 'waitress':
-                        print(f"🔐 SSL (Waitress) enabled: {cert_path}")
                     
                 except Exception as e:
                     print(f"⚠️  SSL failed to initialize, falling back to HTTP: {e}")
