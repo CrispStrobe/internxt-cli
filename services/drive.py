@@ -700,11 +700,12 @@ class DriveService:
     def _get_all_folders(self, folder_uuid: str, offset: int = 0) -> List[Dict[str, Any]]:
         """Recursively get all folders with pagination"""
         try:
-            response = self.api.get_folder_folders(folder_uuid, offset, 50)
+            limit = 50 
+            response = self.api.get_folder_folders(folder_uuid, offset, limit) 
             folders = response.get('result', response.get('folders', []))
 
-            if len(folders) == 50:
-                folders.extend(self._get_all_folders(folder_uuid, offset + 50))
+            if len(folders) == limit: 
+                folders.extend(self._get_all_folders(folder_uuid, offset + limit)) 
 
             return folders
         except Exception as e:
@@ -714,15 +715,78 @@ class DriveService:
     def _get_all_files(self, folder_uuid: str, offset: int = 0) -> List[Dict[str, Any]]:
         """Recursively get all files with pagination"""
         try:
-            response = self.api.get_folder_files(folder_uuid, offset, 50)
+            limit = 50
+            response = self.api.get_folder_files(folder_uuid, offset, limit) 
             files = response.get('result', response.get('files', []))
 
-            if len(files) == 50:
-                files.extend(self._get_all_files(folder_uuid, offset + 50))
+            if len(files) == limit: 
+                files.extend(self._get_all_files(folder_uuid, offset + limit)) 
 
             return files
         except Exception as e:
             print(f"Warning: Failed to get files: {e}")
+            return []
+        
+    def get_full_path_for_item(self, item_metadata: Dict[str, Any]) -> str:
+        """
+        Constructs the full, human-readable path for a file or folder
+        by fetching its ancestors.
+        """
+        
+        # Get the item's own name
+        item_name = item_metadata.get('plainName', 'Unknown')
+        if item_metadata.get('itemType') == 'file' and item_metadata.get('type'):
+            item_name = f"{item_name}.{item_metadata['type']}"
+        
+        # Get the parent folder's UUID
+        parent_uuid = item_metadata.get('folderUuid') # for files
+        if not parent_uuid:
+            parent_uuid = item_metadata.get('parentUuid') # for folders
+        
+        if not parent_uuid:
+            # Item is in the root
+            return f"/{item_name}"
+
+        try:
+            # Call the new API function
+            ancestors = self.api.get_folder_ancestors(parent_uuid)
+            
+            # The 'ancestors' endpoint returns the list from root -> parent
+            path_parts = [ancestor.get('plainName') for ancestor in ancestors]
+            
+            # Filter out the root folder's name (which can be 'root' or null)
+            # and any other empty parts
+            clean_parts = [part for part in path_parts if part and part.lower() != 'root']
+            
+            full_path = "/" + "/".join(clean_parts)
+            
+            # Add the item name itself
+            return f"{full_path.rstrip('/')}/{item_name}"
+        except Exception as e:
+            print(f"  -> ⚠️  Could not build path for {item_name}: {e}")
+            return f"/?/{item_name}" # Return a 'best guess' path
+        
+    def search_drive(self, search_term: str) -> List[Dict[str, Any]]:
+        """
+        Performs a fast, server-side fuzzy search across the entire drive.
+        Note: The API only returns item names, types, and UUIDs, not full paths.
+        """
+        print(f"🔍 Performing server-side fuzzy search for: '{search_term}'")
+        try:
+            # This 'search_files' function already exists in your api.py
+            results = self.api.search_files(search_term, offset=0, limit=50)
+            
+            # The API spec shows the data is in a 'data' key
+            # If not, it might be in 'results' or the root
+            items = results.get('data', results.get('results', results))
+            
+            if not isinstance(items, list):
+                print(" -> ⚠️  Search returned an unexpected format.")
+                return []
+                
+            return items
+        except Exception as e:
+            print(f" -> ❌ Search failed: {e}")
             return []
 
     def create_folder(self, name: str, parent_folder_uuid: str = None,

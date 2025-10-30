@@ -1,31 +1,41 @@
 # Internxt Python CLI
 
-A Python implementation of the Internxt CLI for encrypted cloud storage with **path-based operations** and a **built-in WebDAV server**.
+A Python implementation of the Internxt CLI for encrypted cloud storage with **path-based operations**, **timestamp preservation**, and a **built-in WebDAV server**.
+Note this is an unoffical project and still work on progress.
 
 ## ✨ Features
 
 ### 🌐 **WebDAV Server**
-- ✅ **Mount as a local drive**: Access your Internxt Drive directly from Finder, File Explorer, or any WebDAV client.
-- ✅ **Cross-platform support**: Works on Windows, macOS, and Linux.
-- ✅ **Stable and Compatible**: Uses `waitress` (or `cheroot`, but buggy) for the best client compatibility.
+
+  - ✅ **Mount as a local drive**: Access your Internxt Drive directly from Finder, File Explorer, or any WebDAV client.
+  - ✅ **Cross-platform support**: Works on Windows, macOS, and Linux.
+  - ✅ **Stable and Compatible**: Uses `waitress` (recommended) or `cheroot` for the best client compatibility.
+  - ✅ **Server Choice**: Force `waitress` or `cheroot` with the `--server` flag for debugging.
 
 ### 🛣️ **Path-Based Operations**
-- ✅ **Human-readable paths**: Use `/Documents/report.pdf` instead of UUIDs.
-- ✅ **Wildcard search**: Find files with `*.pdf`, `report*`, etc.
-- ✅ **Tree visualization**: See your folder structure at a glance.
-- ✅ **Path navigation**: Browse folders like your local filesystem.
+
+  - ✅ **Human-readable paths**: Use `/Documents/report.pdf` instead of UUIDs.
+  - ✅ **Fuzzy Search**: Instantly find files and folders with a fast, server-side `search` command.
+  - ✅ **Wildcard Find**: Use `find` with patterns like `*.pdf`, `report*`, etc.
+  - ✅ **Tree visualization**: See your folder structure at a glance.
+  - ✅ **Path navigation**: Browse folders like your local filesystem.
 
 ### 🔐 **Core Functionality**
-- ✅ **Secure authentication**: Login/logout with 2FA support.
-- ✅ **File operations**: Upload, download with progress indicators.
-- ✅ **Folder management**: Create and organize folders.
-- ✅ **Zero-knowledge encryption**: AES-256-CTR client-side encryption.
+
+  - ✅ **Timestamp Preservation**: Preserves original file modification/creation dates on `upload` and `download-path`.
+  - ✅ **Secure authentication**: Login/logout with 2FA support.
+  - ✅ **File operations**: Upload, download with progress indicators.
+  - ✅ **Folder management**: Create and organize folders.
+  - ✅ **Zero-knowledge encryption**: AES-256-CTR client-side encryption.
 
 ## 🚀 Quick Start
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+
+# (Recommended for WebDAV)
+pip install waitress
 
 # Login to your account
 python cli.py login
@@ -35,11 +45,12 @@ python cli.py webdav-start
 
 # Or, use path-based commands
 python cli.py list-path
-python cli.py find "*.pdf"
-python cli.py download-path "/Documents/important.pdf"
-````
+python cli.py search "report"
+python cli.py find /Documents "*.pdf"
+python cli.py upload -r -p ./my-docs /Backups
+```
 
-## 📖 Complete Usage Guide
+## 📖 Usage Guide
 
 ### 🔐 Authentication
 
@@ -68,6 +79,9 @@ python cli.py webdav-start
 # Start in the background
 python cli.py webdav-start --background
 
+# Force a specific server (e.g., cheroot for SSL)
+python cli.py webdav-start --server cheroot
+
 # Check if the server is running
 python cli.py webdav-status
 
@@ -79,51 +93,80 @@ python cli.py webdav-mount
 
 # Test if the server is responding correctly
 python cli.py webdav-test
+
+# Show full WebDAV configuration and paths
+python cli.py webdav-config
+
+# Show advanced debugging info
+python cli.py webdav-debug
+
+# Regenerate SSL certs
+python cli.py webdav-regenerate-ssl
 ```
 
-After starting, open your file manager (Finder/File Explorer) or Client (like CyberDuck) and connect to the server at `http://localhost:8080` with username `internxt` and password `internxt-webdav`.
+After starting, open your file manager (Finder/File Explorer) or Client (like CyberDuck) and connect to the server (e.g., `http://localhost:8080`) with username `internxt` and password `internxt-webdav`.
 
 ### 🛣️ Path-Based Operations
 
-#### Navigate & List
+#### List & Navigate
 
 ```bash
 # List root folder with readable paths
 python cli.py list-path
 
-# Navigate to specific folders
+# List specific folders
 python cli.py list-path "/Documents"
 python cli.py list-path "/Photos/2023/Summer"
 
-# Show detailed information
+# Show detailed information (size, date)
 python cli.py list-path "/Documents" --detailed
-```
 
-#### Search & Find
-
-```bash
-# Find files with wildcards
-python cli.py find "*.pdf"              # All PDF files
-python cli.py find "report*"            # Files starting with "report"
-
-# Search in specific locations
-python cli.py find "*.jpg" --path "/Photos"
-```
-
-#### Visual Navigation
-
-```bash
 # Show folder structure as tree
 python cli.py tree
 python cli.py tree "/Projects" --depth 2
 ```
 
-#### Download Files
+#### Search & Find
 
 ```bash
-# Download by path (much easier!)
-python cli.py download-path "/Documents/report.pdf"
-python cli.py download-path "/Photos/vacation.jpg" --destination ~/Downloads/
+# Fast, global, server-side fuzzy search
+python cli.py search "report"
+
+# Show full details (size, date, full path) (slow!)
+python cli.py search "report" --detailed
+
+# Slow, client-side wildcard find (POSIX-like syntax, slow!)
+python cli.py find / "*.pdf"              # All PDF files in entire drive
+python cli.py find /Photos "*.jpg"        # All JPGs in /Photos
+python cli.py find . "report*"            # Files starting with "report" in current path
+```
+
+#### ⬆️⬇️ Upload & Download
+
+**Upload**
+
+```bash
+# Upload a single file, preserving its timestamp
+python cli.py upload -p ./local-report.pdf /Documents/
+
+# Upload a whole folder recursively, preserving all timestamps
+python cli.py upload -r -p ./my-project /Backups/
+
+# Upload with filters and overwrite conflicts
+python cli.py upload -r ./photos /Photos --include "*.jpg" --on-conflict overwrite
+```
+
+**Download**
+
+```bash
+# Download a file by path, preserving its timestamp
+python cli.py download-path -p "/Documents/report.pdf"
+
+# Download a folder recursively to a local directory
+python cli.py download-path -r "/Photos/2023" --destination ./My-Photos
+
+# Download a folder with filters
+python cli.py download-path -r "/Music" --include "*.mp3" --exclude "demo_*"
 ```
 
 ### 🗑️ Delete & Trash Operations
@@ -153,7 +196,7 @@ python cli.py list --folder-id <folder-uuid>
 # Create folders
 python cli.py mkdir "My New Folder"
 
-# Upload/Download by UUID
+# Upload/Download by UUID (see path-based commands for more features)
 python cli.py upload ./document.pdf
 python cli.py download <file-uuid>
 ```
@@ -178,14 +221,14 @@ python cli.py resolve "/Documents/report.pdf"
 
 ```bash
 # Clone the repository
-git clone [https://github.com/internxt/python-cli.git](https://github.com/internxt/python-cli.git)
+git clone https://github.com/internxt/python-cli.git
 cd python-cli
 
 # Install dependencies
 pip install -r requirements.txt
 
 # For the best WebDAV experience, install 'waitress'
-pip install waitress
+pip install waitress  # (Highly recommended for WebDAV)
 
 # Start using immediately
 python cli.py login
@@ -229,7 +272,7 @@ internxt-cli/
 
 ```bash
 # Clone and setup development environment
-git clone [https://github.com/internxt/python-cli.git](https://github.com/internxt/python-cli.git)
+git clone https://github.com/internxt/python-cli.git
 cd python-cli
 
 # Create virtual environment

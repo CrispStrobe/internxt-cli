@@ -1095,14 +1095,131 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
         traceback.print_exc()
         sys.exit(1)
 
-
-@cli.command()
-@click.argument('pattern')
-@click.option('--path', '-p', default='/', help='Where to search (default: everywhere)')
-def find(pattern: str, path: str):
-    """Search for files by name pattern (supports * and ? wildcards)"""
+@cli.command('search')
+@click.argument('search_term')
+@click.option('--detailed', '-d', is_flag=True, help='Show full metadata (slower)')
+def search(search_term: str, detailed: bool):
+    """
+    Perform a fast, server-side fuzzy search (global).
+    
+    Using -d will fetch full metadata for each result, which is slower.
+    """
     try:
         auth_service.get_auth_details()
+        
+        results = drive_service.search_drive(search_term)
+        
+        if not results:
+            click.echo(f"❌ No items found matching '{search_term}'")
+            return
+        
+        click.echo(f"\n⚡ Found {len(results)} items matching '{search_term}':")
+        
+        hydrated_results = []
+        
+        if detailed:
+            click.echo("🔍 Fetching full metadata for results (this may take a moment)...")
+            
+            try:
+                from tqdm import tqdm
+            except ImportError:
+                class TqdmFallback:
+                    def __init__(self, total=None, desc=None, unit=None): pass
+                    def __enter__(self): return self
+                    def __exit__(self, *args): pass
+                    def update(self, n=1): pass
+                tqdm = TqdmFallback
+
+            with tqdm(total=len(results), desc="Fetching details", unit="item", leave=False) as pbar:
+                for item in results:
+                    try:
+                        uuid = item.get('itemId', item.get('id'))
+                        metadata = {}
+                        if item.get('itemType') == 'folder':
+                            metadata = drive_service.get_folder_metadata(uuid)
+                            metadata['itemType'] = 'folder'
+                        elif item.get('itemType') == 'file':
+                            metadata = drive_service.get_file_metadata(uuid)
+                            metadata['itemType'] = 'file'
+                        
+                        # --- NEW: Get the full path ---
+                        metadata['fullPath'] = drive_service.get_full_path_for_item(metadata)
+                        # --- END NEW ---
+                        
+                        hydrated_results.append(metadata)
+                    except Exception as e:
+                        click.echo(f"\n⚠️  Could not fetch metadata for {item.get('name')}: {e}")
+                    pbar.update(1)
+            results = hydrated_results # Overwrite with the rich data
+            click.echo() # Newline after progress bar
+        
+        click.echo("=" * 80)
+        
+        folders = [item for item in results if item.get('itemType') == 'folder']
+        files = [item for item in results if item.get('itemType') == 'file']
+        
+        if folders:
+            click.echo("📂 Folders:")
+            for folder in folders:
+                name = folder.get('plainName', folder.get('name', 'Unknown'))
+                uuid = folder.get('uuid', folder.get('itemId', 'N/A'))
+                if detailed:
+                    mod_date_iso = folder.get('modificationTime') or folder.get('updatedAt', '')
+                    mod_date = format_date(mod_date_iso) if mod_date_iso else 'N/A'
+                    click.echo(f"  📁 {folder.get('fullPath', name)}") # <-- Show path
+                    click.echo(f"     UUID: {uuid}")
+                    click.echo(f"     Modified: {mod_date}")
+                else:
+                    click.echo(f"  📁 {name}  (UUID: {uuid[:8]}...)")
+        
+        if files:
+            click.echo("\n📄 Files:")
+            for file in files:
+                name = file.get('plainName', file.get('name', 'Unknown'))
+                uuid = file.get('uuid', file.get('itemId', 'N/A'))
+                ext = file.get('type')
+                
+                if ext and not name.endswith(f'.{ext}'):
+                    name = f"{name}.{ext}"
+
+                if detailed:
+                    size = format_size(int(file.get('size', 0)))
+                    mod_date_iso = file.get('modificationTime') or file.get('updatedAt', '')
+                    mod_date = format_date(mod_date_iso) if mod_date_iso else 'N/A'
+                    click.echo(f"  📄 {file.get('fullPath', name)}") # <-- Show path
+                    click.echo(f"     UUID: {uuid}")
+                    click.echo(f"     Size: {size}")
+                    click.echo(f"     Modified: {mod_date}")
+                else:
+                    click.echo(f"  📄 {name}  (UUID: {uuid[:8]}...)")
+
+        click.echo("\n" + "=" * 80)
+        click.echo("💡 Use the UUID with 'download' or the full path with 'download-path'.")
+    
+    except ValueError as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        sys.exit(1)
+
+@cli.command('find')
+@click.argument('path', default='/')
+@click.argument('pattern', default='*')
+def find(path: str, pattern: str):
+    """
+    Search for files by name pattern (POSIX-like).
+
+    Supports wildcards * and ?.
+    
+    Examples:
+      python cli.py find /Documents "*.pdf"
+      python cli.py find . "*.txt"
+    """
+    try:
+        auth_service.get_auth_details()
+        
+        click.echo(f"🔍 Searching for '{pattern}' in {path}")
         
         results = drive_service.find_files(pattern, path)
         

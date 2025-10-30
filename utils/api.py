@@ -8,7 +8,7 @@ import requests
 import json
 import sys
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from config.config import config_service
 
@@ -159,6 +159,16 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/folders/{folder_uuid}/meta"
         return self.put(url, data=update_data)
+    
+    def get_folder_ancestors(self, folder_uuid: str) -> List[Dict[str, Any]]:
+        """
+        Get all parent folders (ancestors) of a given folder
+        Ref: GET /folders/{uuid}/ancestors
+        """
+        url = f"{self.drive_api_url}/folders/{folder_uuid}/ancestors"
+        response = self.get(url)
+        # The API returns a list directly
+        return response if isinstance(response, list) else []
 
     # ========== MOVE OPERATIONS ==========
     

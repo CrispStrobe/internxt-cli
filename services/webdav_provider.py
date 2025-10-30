@@ -629,7 +629,7 @@ class InternxtDAVCollection(DAVCollection):
         self.provider = provider
         self._content_cache = None
         self._content_cached_time = 0
-        self.CACHE_TIMEOUT = 30
+        self.CACHE_TIMEOUT = 300 # 5 min
         
     def get_member_names(self) -> List[str]:
         """Return list of files and folders in this directory"""
