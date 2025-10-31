@@ -244,6 +244,7 @@ class DriveService:
     def trash_file(self, file_uuid: str) -> Dict[str, Any]:
         """Move file to trash"""
         try:
+            self._clear_parent_cache_for_item(file_uuid, 'file')
             response = self.api.trash_file(file_uuid)  # Uses corrected bulk API
             return {'success': True, 'message': 'File moved to trash successfully', 'file': {'uuid': file_uuid}, 'result': response}
         except Exception as e:
@@ -252,6 +253,7 @@ class DriveService:
     def trash_folder(self, folder_uuid: str) -> Dict[str, Any]:
         """Move folder to trash"""
         try:
+            self._clear_parent_cache_for_item(folder_uuid, 'folder')
             response = self.api.trash_folder(folder_uuid)  # Uses corrected bulk API
             return {'success': True, 'message': 'Folder moved to trash successfully', 'folder': {'uuid': folder_uuid}, 'result': response}
         except Exception as e:
@@ -269,16 +271,18 @@ class DriveService:
             return self.trash_folder(resolved['uuid'])
 
     def delete_permanently_file(self, file_uuid: str) -> Dict[str, Any]:
-        """Permanently delete file - matches DeletePermanentlyFile command"""
+        """Permanently delete file"""
         try:
+            self._clear_parent_cache_for_item(file_uuid, 'file')
             response = self.api.delete_file(file_uuid)
             return {'success': True, 'message': 'File permanently deleted successfully'}
         except Exception as e:
             raise Exception(f"Failed to permanently delete file: {e}")
 
     def delete_permanently_folder(self, folder_uuid: str) -> Dict[str, Any]:
-        """Permanently delete folder - matches DeletePermanentlyFolder command"""
+        """Permanently delete folder"""
         try:
+            self._clear_parent_cache_for_item(folder_uuid, 'folder')
             response = self.api.delete_folder(folder_uuid)
             return {'success': True, 'message': 'Folder permanently deleted successfully'}
         except Exception as e:
@@ -300,7 +304,10 @@ class DriveService:
     def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
         """Move file to different folder"""
         try:
+            self._clear_parent_cache_for_item(file_uuid, 'file')
             response = self.api.move_file(file_uuid, destination_folder_uuid)
+            with self.cache_lock:
+                self.folder_content_cache.pop(destination_folder_uuid, None)
             return {'success': True, 'message': f'File moved successfully to: {destination_folder_uuid}', 'result': response}
         except Exception as e:
             raise Exception(f"Failed to move file: {e}")
@@ -308,7 +315,10 @@ class DriveService:
     def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
         """Move folder to different folder"""
         try:
+            self._clear_parent_cache_for_item(folder_uuid, 'folder')
             response = self.api.move_folder(folder_uuid, destination_folder_uuid)
+            with self.cache_lock:
+                self.folder_content_cache.pop(destination_folder_uuid, None)
             return {'success': True, 'message': f'Folder moved successfully to: {destination_folder_uuid}', 'result': response}
         except Exception as e:
             raise Exception(f"Failed to move folder: {e}")
@@ -326,6 +336,9 @@ class DriveService:
                 file_type = None
                 
             response = self.api.rename_file(file_uuid, plain_name, file_type)
+
+            self._clear_parent_cache_for_item(file_uuid, 'file')
+
             return {'success': True, 'message': f'File renamed successfully to: {new_name}', 'result': response}
         except Exception as e:
             raise Exception(f"Failed to rename file: {e}")
@@ -334,6 +347,7 @@ class DriveService:
         """Rename folder"""
         try:
             response = self.api.rename_folder(folder_uuid, new_name)
+            self._clear_parent_cache_for_item(folder_uuid, 'folder')
             return {'success': True, 'message': f'Folder renamed successfully to: {new_name}', 'result': response}
         except Exception as e:
             raise Exception(f"Failed to rename folder: {e}")
@@ -419,6 +433,7 @@ class DriveService:
                 'size': file_size
             }
             result = self.api.replace_file(file_uuid, replace_payload)
+            self._clear_parent_cache_for_item(file_uuid, 'file')
             
             return {
                 'success': True,
@@ -656,6 +671,9 @@ class DriveService:
                 
                 created_file = self.api.create_file_entry(file_entry_payload)
                 pbar.update(1)
+
+                with self.cache_lock:
+                    self.folder_content_cache.pop(destination_folder_uuid, None)
                 
                 # Verify if timestamps were actually set
                 if creation_time or modification_time:
@@ -709,6 +727,25 @@ class DriveService:
         except Exception as e:
             print(f"Error getting folder content: {e}")
             return {'folders': [], 'files': []}
+        
+    def _clear_parent_cache_for_item(self, item_uuid: str, item_type: str = 'file'):
+        """Helper to find an item's parent and clear its cache."""
+        parent_uuid = None
+        try:
+            if item_type == 'file':
+                metadata = self.api.get_file_metadata(item_uuid)
+                parent_uuid = metadata.get('folderUuid')
+            else: # 'folder'
+                metadata = self.api.get_folder_metadata(item_uuid)
+                parent_uuid = metadata.get('parentUuid')
+            
+            if parent_uuid:
+                with self.cache_lock:
+                    self.folder_content_cache.pop(parent_uuid, None)
+                    print(f"  -> Cache cleared for parent folder: {parent_uuid}")
+        except Exception as e:
+            # This is not fatal, just log it
+            print(f"  -> ⚠️  Could not clear parent cache for {item_uuid} (parent: {parent_uuid}): {e}")
 
     def list_folder(self, folder_uuid: str = None) -> Dict[str, List[Dict[str, Any]]]:
         """List folder contents - backward compatibility"""
@@ -836,8 +873,13 @@ class DriveService:
             payload['modificationTime'] = modification_time
             print(f"     🕐 Adding folder modificationTime: {modification_time}")
 
-        # This now calls the modified api.create_folder(payload)
-        return self.api.create_folder(payload)
+        result = self.api.create_folder(payload)
+        
+        # Clear the parent folder's cache
+        with self.cache_lock:
+            self.folder_content_cache.pop(parent_folder_uuid, None)
+        
+        return result
 
     def create_folder_recursive(self, path: str,
                               creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
@@ -899,6 +941,9 @@ class DriveService:
                                 'plainName': part, 
                                 'parentFolderUuid': current_parent_uuid
                             })
+
+                            with self.cache_lock:
+                                self.folder_content_cache.pop(current_parent_uuid, None)
                         
                         current_parent_uuid = new_folder['uuid']
                         final_folder_info = new_folder
