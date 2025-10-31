@@ -71,6 +71,10 @@ class DriveService:
         root_folder_uuid = credentials['user'].get('rootFolderId', '')
         
         path = path.strip()
+
+        if path == '.':
+            path = '/'
+
         if path.startswith('/'):
             path = path[1:]
         
@@ -213,29 +217,52 @@ class DriveService:
             'current_path': base_path
         }
 
-    def find_files(self, search_term: str, folder_path: str = "/") -> List[Dict[str, Any]]:
-        """Search for files by name with wildcards"""
-        print(f"🔍 Searching for '{search_term}' in {folder_path}")
+    def find_files(self, search_term: str, folder_path: str = "/", case_sensitive: bool = False, max_depth: int = -1) -> List[Dict[str, Any]]:
+        """
+        Search for files by name with wildcards, with optional case sensitivity and max depth.
+        max_depth = -1 means infinite depth.
+        max_depth = 1 means search *only* this folder, not subfolders.
+        """
+        if case_sensitive:
+            print(f"🔍 Searching for '{search_term}' (case-sensitive) in {folder_path}")
+        else:
+            print(f"🔍 Searching for '{search_term}' (case-insensitive) in {folder_path}")
         
         results = []
         
-        def search_recursive(current_path: str):
+        def search_recursive(current_path: str, current_relative_depth: int):
+            # Check if we have gone too deep
+            # max_depth=1 will stop recursion (depth 0 >= 1 is false)
+            # max_depth=2 will allow one level (depth 1 >= 2 is false)
+            if max_depth != -1 and current_relative_depth >= max_depth:
+                return # Stop searching this branch
+        
             try:
+                # This call is cached, so it's fast
                 content = self.list_folder_with_paths(current_path)
                 
                 # Check files in current folder
                 for file in content['files']:
-                    if fnmatch.fnmatch(file['display_name'].lower(), search_term.lower()):
+                    display_name = file['display_name']
+                    
+                    match = False
+                    if case_sensitive:
+                        match = fnmatch.fnmatch(display_name, search_term)
+                    else:
+                        match = fnmatch.fnmatch(display_name.lower(), search_term.lower())
+                    
+                    if match:
                         results.append({**file, 'found_in': current_path})
-                
+
                 # Search subfolders recursively
                 for folder in content['folders']:
-                    search_recursive(folder['path'])
+                    search_recursive(folder['path'], current_relative_depth + 1)
                     
             except Exception as e:
                 print(f"   ⚠️  Could not search in {current_path}: {e}")
         
-        search_recursive(folder_path)
+        search_recursive(folder_path, 0)
+        
         print(f"📍 Found {len(results)} matching files")
         return results
 

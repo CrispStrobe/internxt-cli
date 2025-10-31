@@ -1205,29 +1205,48 @@ def search(search_term: str, detailed: bool):
 
 @cli.command('find')
 @click.argument('path', default='/')
-@click.argument('pattern', default='*')
-def find(path: str, pattern: str):
+@click.option('--name', 'name_pattern', default=None, help='Case-sensitive name pattern (e.g., "*.py")')
+@click.option('--iname', 'iname_pattern', default=None, help='Case-insensitive name pattern (e.g., "*.py")')
+@click.option('--maxdepth', type=int, default=-1, help='Limit search to N levels deep (-1 for infinite).') # <-- ADDED
+def find(path: str, name_pattern: Optional[str], iname_pattern: Optional[str], maxdepth: int): # <-- ADDED
     """
     Search for files by name pattern (POSIX-like).
 
-    Search is case-insensitive and supports * and ? wildcards.
-    
     Examples:
-      python cli.py find /Documents "*.pdf"
-      python cli.py find . "*.txt"
+      python cli.py find / --name "*.pdf"
+      python cli.py find . --iname "*.jpg" --maxdepth 2
     """
     try:
+        search_term = None
+        case_sensitive = False
+
+        if name_pattern and iname_pattern:
+            click.echo("❌ Error: You can only use --name or --iname, not both.", err=True)
+            sys.exit(1)
+        elif name_pattern:
+            search_term = name_pattern
+            case_sensitive = True
+        elif iname_pattern:
+            search_term = iname_pattern
+            case_sensitive = False
+        else:
+            click.echo("❌ Error: You must provide either --name or --iname.", err=True)
+            sys.exit(1)
+
         auth_service.get_auth_details()
         
-        click.echo(f"🔍 Searching for '{pattern}' in {path}")
-        
-        results = drive_service.find_files(pattern, path)
+        results = drive_service.find_files(
+            search_term, 
+            path, 
+            case_sensitive=case_sensitive,
+            max_depth=maxdepth
+        )
         
         if not results:
-            click.echo(f"❌ No files found matching '{pattern}' in {path}")
+            click.echo(f"❌ No files found matching '{search_term}' in {path}")
             return
         
-        click.echo(f"\n🔍 Found {len(results)} files matching '{pattern}':")
+        click.echo(f"\n🔍 Found {len(results)} files matching '{search_term}':")
         click.echo("=" * 80)
         
         for file in results:
@@ -1237,7 +1256,6 @@ def find(path: str, pattern: str):
             click.echo(f"   Size: {size:<10} Modified: {modified:<12} UUID: {file['uuid'][:8]}...")
             click.echo()
         
-        # Show usage examples
         if results:
             example = results[0]
             click.echo(f"💡 Usage examples:")
@@ -1250,7 +1268,6 @@ def find(path: str, pattern: str):
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
         sys.exit(1)
-
 
 @cli.command()
 @click.argument('path')
