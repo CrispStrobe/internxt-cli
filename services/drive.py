@@ -905,31 +905,22 @@ class DriveService:
             found_folder = None
             
             try:
-                # 1. Check if the folder already exists
+                # 1. Check if the folder already exists (uses the cache)
                 content = self.get_folder_content(current_parent_uuid)
                 for folder in content['folders']:
                     if folder.get('plainName') == part or folder.get('name') == part:
                         found_folder = folder
                         break
 
-                if found_folder:
-                    # 2. FOLDER EXISTS: We cannot update its timestamp.
-                    # Just use its info and move to the next part.
-                    current_parent_uuid = found_folder['uuid']
-                    final_folder_info = found_folder
-                    
-                    if is_last_part and (creation_time or modification_time):
-                        print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
-                
-                else:
-                    # 3. FOLDER DOES NOT EXIST: Create it new.
+                if not found_folder:
+                    # 2. FOLDER DOES NOT EXIST: Try to create it.
                     try:
                         print(f"  -> Creating new folder: {part} in {current_path_so_far}")
                         
-                        # We only pass timestamps if this is the *final* folder
                         if is_last_part:
+                            # This is the final folder, create it WITH timestamps
                             print(f"  -> 🕐 Applying timestamps to new folder: {part}")
-                            new_folder = self.create_folder(
+                            new_folder = self.create_folder( # This clears the parent cache
                                 part, 
                                 current_parent_uuid,
                                 creation_time=creation_time,
@@ -941,35 +932,52 @@ class DriveService:
                                 'plainName': part, 
                                 'parentFolderUuid': current_parent_uuid
                             })
-
+                            # Manually clear the parent cache
                             with self.cache_lock:
                                 self.folder_content_cache.pop(current_parent_uuid, None)
                         
-                        current_parent_uuid = new_folder['uuid']
-                        final_folder_info = new_folder
-
-                        # Clear the cache for the parent folder
-                        with self.cache_lock:
-                            self.folder_content_cache.pop(current_parent_uuid, None)
+                        found_folder = new_folder
                     
                     except Exception as e:
-                        # Handle the race condition we saw before
+                        # Handle API consistency race condition
                         if "already exists" in str(e):
-                            print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Resolving...")
-                            try:
-                                existing_folder_path = f"{current_path_so_far.rstrip('/')}/{part}"
-                                resolved = self.resolve_path(existing_folder_path)
-                                current_parent_uuid = resolved['uuid']
-                                final_folder_info = resolved['metadata']
-                            except Exception as e2:
-                                raise Exception(f"Failed to create folder '{part}' and could not resolve it after: {e2}")
+                            print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Retrying list...")
+                            
+                            # It exists, but our cache or API is stale.
+                            # We must re-fetch the parent content until we find it.
+                            found_folder = None
+                            for _ in range(3): # Try 3 times
+                                time.sleep(0.5) # Wait 500ms for API to catch up
+                                
+                                # Manually clear cache again, just in case
+                                with self.cache_lock:
+                                    self.folder_content_cache.pop(current_parent_uuid, None)
+                                
+                                content = self.get_folder_content(current_parent_uuid)
+                                for folder in content['folders']:
+                                    if folder.get('plainName') == part:
+                                        found_folder = folder
+                                        break
+                                if found_folder:
+                                    break # We found it!
+                            
+                            if not found_folder:
+                                # If we still can't find it, something is wrong.
+                                raise Exception(f"Failed to create folder '{part}' and could not resolve it after 3 retries.")
                         else:
                             raise e # Re-raise other errors
 
+                # 3. By this point, 'found_folder' *must* have the folder info
+                current_parent_uuid = found_folder['uuid']
+                final_folder_info = found_folder
                 current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
-                
-                # If this is the last part, return the info we found or created
+
+                # 4. Apply timestamps if it's the last part and *didn't* just get created
                 if is_last_part:
+                    if (creation_time or modification_time) and not new_folder:
+                        # Folder existed, so we can't set timestamps
+                        print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
+                    
                     return final_folder_info
 
             except Exception as e:
