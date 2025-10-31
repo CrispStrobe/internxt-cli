@@ -1210,7 +1210,7 @@ def find(path: str, pattern: str):
     """
     Search for files by name pattern (POSIX-like).
 
-    Supports wildcards * and ?.
+    Search is case-insensitive and supports * and ? wildcards.
     
     Examples:
       python cli.py find /Documents "*.pdf"
