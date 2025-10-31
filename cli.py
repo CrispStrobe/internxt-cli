@@ -1205,23 +1205,23 @@ def search(search_term: str, detailed: bool):
 
 @cli.command('find')
 @click.argument('path', default='/')
-@click.option('--name', 'name_pattern', default=None, help='Case-sensitive name pattern (e.g., "*.py")')
-@click.option('--iname', 'iname_pattern', default=None, help='Case-insensitive name pattern (e.g., "*.py")')
+@click.option('-name', 'name_pattern', default=None, help='Case-sensitive name pattern (e.g., "*.py")')
+@click.option('-iname', 'iname_pattern', default=None, help='Case-insensitive name pattern (e.g., "*.py")')
 @click.option('--maxdepth', type=int, default=-1, help='Limit search to N levels deep (-1 for infinite).') # <-- ADDED
 def find(path: str, name_pattern: Optional[str], iname_pattern: Optional[str], maxdepth: int): # <-- ADDED
     """
     Search for files by name pattern (POSIX-like).
 
     Examples:
-      python cli.py find / --name "*.pdf"
-      python cli.py find . --iname "*.jpg" --maxdepth 2
+      python cli.py find / -name "*.pdf"
+      python cli.py find . -iname "*.jpg" --maxdepth 2
     """
     try:
         search_term = None
         case_sensitive = False
 
         if name_pattern and iname_pattern:
-            click.echo("❌ Error: You can only use --name or --iname, not both.", err=True)
+            click.echo("❌ Error: You can only use -name or -iname, not both.", err=True)
             sys.exit(1)
         elif name_pattern:
             search_term = name_pattern
