@@ -943,9 +943,8 @@ class DriveService:
                     # 2. FOLDER DOES NOT EXIST: Try to create it.
                     try:
                         print(f"  -> Creating new folder: {part} in {current_path_so_far}")
-                        
+                        new_folder = {}
                         if is_last_part:
-                            # This is the final folder, create it WITH timestamps
                             print(f"  -> 🕐 Applying timestamps to new folder: {part}")
                             new_folder = self.create_folder( # This clears the parent cache
                                 part, 
@@ -954,7 +953,6 @@ class DriveService:
                                 modification_time=modification_time
                             )
                         else:
-                            # Create intermediate folders *without* timestamps
                             new_folder = self.api.create_folder({
                                 'plainName': part, 
                                 'parentFolderUuid': current_parent_uuid
@@ -966,7 +964,7 @@ class DriveService:
                         found_folder = new_folder
                     
                     except Exception as e:
-                        # Handle API consistency race condition
+                        # --- BEGIN FIX: Handle API consistency race condition ---
                         if "already exists" in str(e):
                             print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Retrying list...")
                             
@@ -976,16 +974,18 @@ class DriveService:
                             for _ in range(3): # Try 3 times
                                 time.sleep(0.5) # Wait 500ms for API to catch up
                                 
-                                # Manually clear cache again, just in case
+                                # Manually clear cache again
                                 with self.cache_lock:
                                     self.folder_content_cache.pop(current_parent_uuid, None)
                                 
+                                # Re-fetch content
                                 content = self.get_folder_content(current_parent_uuid)
                                 for folder in content['folders']:
-                                    if folder.get('plainName') == part:
+                                    if folder.get('plainName') == part or folder.get('name') == part:
                                         found_folder = folder
                                         break
                                 if found_folder:
+                                    print(f"  -> ✅ Found '{part}' on retry.")
                                     break # We found it!
                             
                             if not found_folder:
@@ -993,6 +993,7 @@ class DriveService:
                                 raise Exception(f"Failed to create folder '{part}' and could not resolve it after 3 retries.")
                         else:
                             raise e # Re-raise other errors
+                        # --- END FIX ---
 
                 # 3. By this point, 'found_folder' *must* have the folder info
                 current_parent_uuid = found_folder['uuid']
@@ -1002,7 +1003,6 @@ class DriveService:
                 # 4. Apply timestamps if it's the last part and *didn't* just get created
                 if is_last_part:
                     if (creation_time or modification_time) and not new_folder:
-                        # Folder existed, so we can't set timestamps
                         print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
                     
                     return final_folder_info
