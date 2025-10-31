@@ -700,7 +700,14 @@ class DriveService:
                 pbar.update(1)
 
                 with self.cache_lock:
-                    self.folder_content_cache.pop(destination_folder_uuid, None)
+                    cached_item = self.folder_content_cache.get(destination_folder_uuid)
+                    if cached_item:
+                        cache_time, content = cached_item
+                        # Add new file to the 'files' list in the cache
+                        content['files'].append(created_file)
+                        # Save the updated cache content
+                        self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
+                        print(f"  -> Cache updated for parent: {destination_folder_uuid}")
                 
                 # Verify if timestamps were actually set
                 if creation_time or modification_time:
@@ -879,7 +886,7 @@ class DriveService:
 
     def create_folder(self, name: str, parent_folder_uuid: str = None,
                       creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
-        """Create new folder with optional timestamps"""
+        """Create new folder with optional timestamps AND update cache."""
         credentials = self.auth.get_auth_details()
 
         if not parent_folder_uuid:
@@ -887,7 +894,6 @@ class DriveService:
             if not parent_folder_uuid:
                 raise ValueError("No root folder ID found")
         
-        # Build payload for the new api.create_folder
         payload = {
             'plainName': name,
             'parentFolderUuid': parent_folder_uuid
@@ -900,13 +906,23 @@ class DriveService:
             payload['modificationTime'] = modification_time
             print(f"     🕐 Adding folder modificationTime: {modification_time}")
 
-        result = self.api.create_folder(payload)
+        # 1. Create the folder via the API
+        new_folder_metadata = self.api.create_folder(payload)
         
-        # Clear the parent folder's cache
+        # 2. Add the new folder to the parent's cache immediately
         with self.cache_lock:
-            self.folder_content_cache.pop(parent_folder_uuid, None)
-        
-        return result
+            cached_item = self.folder_content_cache.get(parent_folder_uuid)
+            if cached_item:
+                cache_time, content = cached_item
+                # Add new folder to the 'folders' list in the cache
+                content['folders'].append(new_folder_metadata)
+                # Save the updated cache content
+                self.folder_content_cache[parent_folder_uuid] = (cache_time, content)
+                print(f"  -> Cache updated for parent: {parent_folder_uuid}")
+            # If parent isn't in cache, that's fine. It will be fetched
+            # (and will include the new folder) on the next call.
+
+        return new_folder_metadata
 
     def create_folder_recursive(self, path: str,
                               creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
@@ -964,7 +980,6 @@ class DriveService:
                         found_folder = new_folder
                     
                     except Exception as e:
-                        # --- BEGIN FIX: Handle API consistency race condition ---
                         if "already exists" in str(e):
                             print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Retrying list...")
                             
@@ -993,7 +1008,6 @@ class DriveService:
                                 raise Exception(f"Failed to create folder '{part}' and could not resolve it after 3 retries.")
                         else:
                             raise e # Re-raise other errors
-                        # --- END FIX ---
 
                 # 3. By this point, 'found_folder' *must* have the folder info
                 current_parent_uuid = found_folder['uuid']

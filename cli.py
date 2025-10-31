@@ -361,9 +361,10 @@ def upload(sources: Tuple[str], target_path: str, recursive: bool, on_conflict: 
             click.echo(f"🚫 Exclude filters: {', '.join(exclude_patterns)}")
 
     try:
-        credentials = auth_service.get_auth_details()
         click.echo("🔄 Refreshing authentication token...")
-        auth_service.get_auth_details()
+        auth_service.refresh_tokens() # This will now work
+        credentials = auth_service.get_auth_details() # This gets the *new* token
+        
         click.echo(f"🎯 Preparing upload to remote path: {target_path}")
 
         # --- Resolve or Create Target Folder ---

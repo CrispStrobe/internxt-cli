@@ -113,6 +113,42 @@ class AuthService:
             'lastLoggedInAt': datetime.now(timezone.utc).isoformat(),
             'lastTokenRefreshAt': datetime.now(timezone.utc).isoformat(),
         }
+    
+    def refresh_tokens(self) -> Dict[str, Any]:
+        """
+        Refreshes and saves auth tokens.
+        """
+        try:
+            # 1. Get current (stale) credentials from disk
+            creds = self.config.read_user_credentials()
+            current_new_token = creds.get('newToken')
+            if not current_new_token:
+                raise ValueError("No 'newToken' found to refresh.")
+            
+            # 2. Call the API to refresh (using the function we just added to api.py)
+            refresh_response = self.api.refresh_token(current_new_token)
+            
+            new_token = refresh_response.get('token')      # The new access token
+            new_new_token = refresh_response.get('newToken') # The new (refreshed) session token
+            
+            if not new_token or not new_new_token:
+                raise ValueError("Refresh response did not contain new tokens.")
+            
+            # 3. Update and save credentials
+            creds['token'] = new_token
+            creds['newToken'] = new_new_token
+            creds['lastTokenRefreshAt'] = datetime.now(timezone.utc).isoformat()
+            
+            self.config.save_user_credentials(creds)
+            
+            # 4. Update the global api_client for the current session
+            self.api.set_auth_tokens(new_token, new_new_token)
+            
+            return creds
+            
+        except Exception as e:
+            # If refresh fails, re-raise. The user must log in again.
+            raise Exception(f"Token refresh failed: {e}. Please login again.") from e
 
     def login(self, email: str, password: str, tfa_code: Optional[str] = None) -> Dict[str, Any]:
         credentials = self.do_login(email, password, tfa_code)

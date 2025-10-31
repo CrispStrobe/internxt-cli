@@ -34,6 +34,20 @@ class ApiClient:
         else:
             self.session.headers.pop('Authorization', None)
 
+    def refresh_token(self, current_new_token: str) -> Dict[str, Any]:
+        """
+        Refreshes the auth token.
+        The Internxt "newToken" acts as a long-lived refresh token.
+        We send it as the Bearer token to the refresh endpoint.
+        """
+        url = f"{self.drive_api_url}/users/refresh" 
+        headers = {'Authorization': f'Bearer {current_new_token}'}
+        
+        # Make the GET request *without* the default session auth
+        response = self._make_request("GET", url, headers=headers)
+        
+        return response.json() if response.content else {}
+
     def _make_request(self, method: str, url: str, data: Optional[Any] = None, 
                       headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None, 
                       auth: Optional[tuple] = None, is_json=True) -> requests.Response:
