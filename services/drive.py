@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from tqdm import tqdm
 import time
+import threading
 
 # Fix imports to work both as module and direct script
 try:
@@ -40,6 +41,10 @@ class DriveService:
         self.api = api_client
         self.crypto = crypto_service
         self.auth = auth_service
+
+        self.folder_content_cache = {}
+        self.cache_lock = threading.Lock()
+        self.CACHE_DURATION_SECONDS = 600 # 10 minutes
 
         self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024   # 20GB limit
         self.MULTIPART_THRESHOLD = 100 * 1024 * 1024      # 100MB multipart threshold
@@ -676,12 +681,31 @@ class DriveService:
     # ========== CORE OPERATIONS ==========
 
     def get_folder_content(self, folder_uuid: str) -> Dict[str, List[Dict[str, Any]]]:
-        """Get folder contents"""
+        """Get folder contents, with caching"""
+        
+        # --- BEGIN CACHE CHECK ---
+        with self.cache_lock:
+            cached_item = self.folder_content_cache.get(folder_uuid)
+            if cached_item:
+                cache_time, content = cached_item
+                if (time.time() - cache_time) < self.CACHE_DURATION_SECONDS:
+                    # Return the cached content if it's not expired
+                    return content
+        # --- END CACHE CHECK ---
+
         try:
             credentials = self.auth.get_auth_details()
             folders = self._get_all_folders(folder_uuid)
             files = self._get_all_files(folder_uuid)
-            return {'folders': folders, 'files': files}
+            content = {'folders': folders, 'files': files}
+
+            # --- BEGIN CACHE SET ---
+            with self.cache_lock:
+                # Store the new content with the current time
+                self.folder_content_cache[folder_uuid] = (time.time(), content)
+            # --- END CACHE SET ---
+            
+            return content
         except Exception as e:
             print(f"Error getting folder content: {e}")
             return {'folders': [], 'files': []}
@@ -878,6 +902,10 @@ class DriveService:
                         
                         current_parent_uuid = new_folder['uuid']
                         final_folder_info = new_folder
+
+                        # Clear the cache for the parent folder
+                        with self.cache_lock:
+                            self.folder_content_cache.pop(current_parent_uuid, None)
                     
                     except Exception as e:
                         # Handle the race condition we saw before
