@@ -1,7 +1,10 @@
 # Internxt Python CLI
 
 A Python implementation of the Internxt CLI for encrypted cloud storage with **path-based operations**, **timestamp preservation**, and a **built-in WebDAV server**.
-Note this is an unoffical project and still work on progress.
+
+## ⚠️ Disclaimer
+
+This is an unofficial, open-source project and is **not** affiliated with, endorsed by, or supported by Internxt, Inc. It is a personal project built for learning and to provide an alternative interface. Use it at your own risk.
 
 ## ✨ Features
 
