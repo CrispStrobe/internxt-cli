@@ -224,8 +224,8 @@ python cli.py resolve "/Documents/report.pdf"
 
 ```bash
 # Clone the repository
-git clone https://github.com/internxt/python-cli.git
-cd python-cli
+git clone https://github.com/CrispStrobe/internxt-python
+cd internxt-python
 
 # Install dependencies
 pip install -r requirements.txt
@@ -257,7 +257,7 @@ This CLI implements **the same security model** as official Internxt clients:
 ### Project Structure
 
 ```
-internxt-cli/
+internxt-python/
 ├── cli.py                    # Main CLI interface with all commands
 ├── config/
 │   └── config.py             # Configuration management
@@ -275,8 +275,8 @@ internxt-cli/
 
 ```bash
 # Clone and setup development environment
-git clone https://github.com/internxt/python-cli.git
-cd python-cli
+git clone https://github.com/CrispStrobe/internxt-python.git
+cd internxt-python
 
 # Create virtual environment
 python -m venv venv
